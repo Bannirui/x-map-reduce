@@ -12,3 +12,13 @@ chmod +x ./build.sh
 ./build.sh
 ./build/bin/x-map-reduce
 ```
+
+V1  Single-process MapReduce
+        ↓
+V2  Multi-threaded MapReduce
+        ↓
+V3  Multi-process MapReduce
+        ↓
+V4  Distributed MapReduce over TCP
+        ↓
+V5  Fault-tolerant MapReduce
