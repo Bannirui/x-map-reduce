@@ -1,6 +1,7 @@
 #include"mapreduce.h"
 
 #include<algorithm>
+#include<cstdint>
 #include<exception>
 #include<fstream>
 #include<iterator>
@@ -183,4 +184,17 @@ std::vector<KeyValue> ReadKeyValues(const std::string& path){
         pairs.emplace_back(line.substr(0,tab),line.substr(tab+1));
     }
     return pairs;
+}
+
+std::size_t partitionOf(const Key& key,std::size_t reducers){
+    if(reducers<=1){
+        return 0;
+    }
+    // FNV-1a (32-bit)
+    std::uint32_t hash=2166136261u;
+    for(const unsigned char byte:key){
+        hash^=byte;
+        hash*=16777619u;
+    }
+    return static_cast<std::size_t>(hash%reducers);
 }

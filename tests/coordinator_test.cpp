@@ -2,6 +2,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -82,6 +83,7 @@ int main(int argc, char** argv) {
 
     std::vector<std::string> args = {
         "--job", "word_count",
+        "--reducers", "3",
         "--work-dir", workDir.string(),
         "--output", output.string(),
     };
@@ -102,6 +104,37 @@ int main(int argc, char** argv) {
     check(fs::exists(workDir / "map-0.txt") && fs::exists(workDir / "map-1.txt")
               && fs::exists(workDir / "map-2.txt"),
           "one intermediate file per input should be produced");
+
+    // Each key must land in exactly one reduce partition.
+    const std::vector<fs::path> parts = {
+        workDir / "part-0.txt", workDir / "part-1.txt", workDir / "part-2.txt"};
+    auto keysIn = [](const fs::path& path) {
+        std::set<std::string> keys;
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto tab = line.find('\t');
+            if (tab != std::string::npos) {
+                keys.insert(line.substr(0, tab));
+            }
+        }
+        return keys;
+    };
+    std::vector<std::set<std::string>> partitions;
+    for (const auto& part : parts) {
+        check(fs::exists(part), "reduce part should exist: " + part.filename().string());
+        partitions.push_back(keysIn(part));
+    }
+    std::map<std::string, int> keyCounts;
+    for (const auto& keys : partitions) {
+        for (const auto& key : keys) {
+            ++keyCounts[key];
+        }
+    }
+    check(keyCounts.size() == 5, "partitions should cover all 5 keys");
+    for (const auto& [key, count] : keyCounts) {
+        check(count == 1, "key must appear in exactly one partition: " + key);
+    }
 
     fs::remove_all(dir);
 

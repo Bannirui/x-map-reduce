@@ -6,5 +6,8 @@ target_include_directories(jobs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(map_worker map_worker.cpp)
 target_link_libraries(map_worker PRIVATE jobs)
 
+add_executable(reduce_worker reduce_worker.cpp)
+target_link_libraries(reduce_worker PRIVATE jobs)
+
 add_executable(coordinator coordinator.cpp)
 target_link_libraries(coordinator PRIVATE jobs)

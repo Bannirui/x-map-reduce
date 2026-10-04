@@ -1,6 +1,7 @@
 #include"jobs.h"
 #include"mapreduce.h"
 
+#include<algorithm>
 #include<cerrno>
 #include<filesystem>
 #include<iostream>
@@ -18,11 +19,11 @@ namespace {
 
 void usage(const char* program){
     std::cerr<<"Usage: "<<program
-             <<" --job <name> --work-dir <dir> --output <file> <input...>\n";
+             <<" --job <name> [--reducers <R>] --work-dir <dir> --output <file> <input...>\n";
 }
 
-// Directory holding this executable, so map_worker is found as a sibling
-// regardless of the current working directory.
+// Directory holding this executable, so map_worker / reduce_worker are found as
+// siblings regardless of the current working directory.
 fs::path executableDir(){
     std::error_code error;
     const auto self=fs::read_symlink("/proc/self/exe",error);
@@ -32,19 +33,21 @@ fs::path executableDir(){
     return fs::current_path();
 }
 
-pid_t spawnMapWorker(const fs::path& worker,
-                     const std::string& job,
-                     const std::string& input,
-                     const std::string& output){
+pid_t spawnProcess(const fs::path& program,const std::vector<std::string>& args){
     const pid_t pid=fork();
     if(pid<0){
         throw std::runtime_error("fork failed");
     }
     if(pid==0){
-        execl(worker.c_str(),worker.c_str(),
-              "--job",job.c_str(),input.c_str(),output.c_str(),
-              static_cast<char*>(nullptr));
-        // execl only returns on failure; _exit avoids flushing inherited stdio.
+        std::vector<char*> argv;
+        argv.reserve(args.size()+2);
+        argv.push_back(const_cast<char*>(program.c_str()));
+        for(const auto& arg:args){
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv.push_back(static_cast<char*>(nullptr));
+        execv(program.c_str(),argv.data());
+        // execv only returns on failure; _exit avoids flushing inherited stdio.
         _exit(127);
     }
     return pid;
@@ -59,7 +62,7 @@ void waitFor(const std::vector<pid_t>& children){
             }
         }
         if(!WIFEXITED(status)||WEXITSTATUS(status)!=0){
-            throw std::runtime_error("map worker exited abnormally");
+            throw std::runtime_error("worker exited abnormally");
         }
     }
 }
@@ -67,31 +70,29 @@ void waitFor(const std::vector<pid_t>& children){
 }  // namespace
 
 /**
- * V3.0 coordinator: forks one map_worker process per input file, waits for all
- * of them, then runs Shuffle + Reduce in-process over the intermediate files.
+ * V3.1 coordinator: forks one map_worker per input file, waits, then forks R
+ * reduce_worker processes (each keeps fnv(key) % R == its index), waits, and
+ * merges their sorted part files into one key-ordered output.
  *
- *   coordinator ──fork/exec──> map_worker 0 ──> map-0.txt
- *               ──fork/exec──> map_worker 1 ──> map-1.txt
- *               ──fork/exec──> map_worker 2 ──> map-2.txt
- *                              (waitpid all)
- *                                  │
- *               Shuf fle + Reduce over map-*.txt
- * command:
- *   ./coordinator --job word_count \
- *                 --work-dir . \
- *                 --output wc.txt \
- *                 asset/wordCount1.txt asset/wordCount2.txt asset/wordCount3.txt 
+ *   coordinator ──> map_worker 0..N ──> map-<i>.txt
+ *                       (waitpid all)
+ *   coordinator ──> reduce_worker 0..R-1 ──> part-<r>.txt
+ *                       (waitpid all)
+ *                       merge sorted parts -> output
  */
 int main(int argc,char** argv){
     std::string jobName;
     std::string outputFile;
     fs::path workDir;
+    std::size_t reducers=3;
     std::vector<std::string> inputs;
 
     for(int i=1;i<argc;++i){
         const std::string arg=argv[i];
         if(arg=="--job"&&i+1<argc){
             jobName=argv[++i];
+        }else if(arg=="--reducers"&&i+1<argc){
+            reducers=std::stoul(argv[++i]);
         }else if(arg=="--work-dir"&&i+1<argc){
             workDir=argv[++i];
         }else if(arg=="--output"&&i+1<argc){
@@ -101,7 +102,7 @@ int main(int argc,char** argv){
         }
     }
 
-    if(jobName.empty()||outputFile.empty()||inputs.empty()){
+    if(jobName.empty()||outputFile.empty()||inputs.empty()||reducers==0){
         usage(argv[0]);
         return 2;
     }
@@ -120,27 +121,51 @@ int main(int argc,char** argv){
 
     try{
         fs::create_directories(workDir);
-        const fs::path worker=executableDir()/"map_worker";
+        const fs::path execDir=executableDir();
 
-        std::vector<pid_t> children;
+        // Map phase: one process per input file.
+        std::vector<pid_t> mapChildren;
         std::vector<fs::path> intermediates;
         for(std::size_t i=0;i<inputs.size();++i){
             const fs::path intermediate=workDir/("map-"+std::to_string(i)+".txt");
             intermediates.push_back(intermediate);
-            children.push_back(spawnMapWorker(worker,jobName,inputs[i],intermediate.string()));
+            mapChildren.push_back(spawnProcess(execDir/"map_worker",
+                {"--job",jobName,inputs[i],intermediate.string()}));
         }
-        waitFor(children);
+        waitFor(mapChildren);
 
+        // Reduce phase: R processes, each filtering its partition.
+        std::vector<pid_t> reduceChildren;
+        std::vector<fs::path> parts;
+        for(std::size_t r=0;r<reducers;++r){
+            const fs::path part=workDir/("part-"+std::to_string(r)+".txt");
+            parts.push_back(part);
+            std::vector<std::string> args{
+                "--job",jobName,
+                "--index",std::to_string(r),
+                "--reducers",std::to_string(reducers),
+                "--output",part.string(),
+            };
+            for(const auto& intermediate:intermediates){
+                args.push_back(intermediate.string());
+            }
+            reduceChildren.push_back(spawnProcess(execDir/"reduce_worker",args));
+        }
+        waitFor(reduceChildren);
+
+        // Merge the (already individually sorted) part files into one output.
         std::vector<KeyValue> merged;
-        for(const auto& intermediate:intermediates){
-            auto pairs=ReadKeyValues(intermediate.string());
+        for(const auto& part:parts){
+            auto pairs=ReadKeyValues(part.string());
             merged.insert(merged.end(),
                 std::make_move_iterator(pairs.begin()),
                 std::make_move_iterator(pairs.end()));
         }
-
-        MapReduce reduceRunner(job->mapper,job->reducer);
-        reduceRunner.ShuffleAndReduce(std::move(merged),outputFile);
+        std::stable_sort(merged.begin(),merged.end(),
+            [](const KeyValue& a,const KeyValue& b){
+                return a.first<b.first;
+            });
+        WriteKeyValues(outputFile,merged);
     }catch(const std::exception& error){
         std::cerr<<"coordinator: "<<error.what()<<'\n';
         return 1;

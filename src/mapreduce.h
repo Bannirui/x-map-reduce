@@ -31,3 +31,7 @@ private:
 // Plain "key\tvalue\n" intermediate file format (V3).
 void WriteKeyValues(const std::string& path,const std::vector<KeyValue>& pairs);
 std::vector<KeyValue> ReadKeyValues(const std::string& path);
+
+// Stable FNV-1a hash partition, key -> [0, reducers). Shared so map and reduce
+// agree across processes (std::hash is not guaranteed stable).
+std::size_t partitionOf(const Key& key,std::size_t reducers);
