@@ -10,15 +10,20 @@ refer to https://static.googleusercontent.com/media/research.google.com/en//arch
 ```sh
 chmod +x ./build.sh
 ./build.sh
-./build/bin/x-map-reduce
+
+# word count
+cd ./build/bin
+./wordCount
+
+# calculate
+cd ./build/bin
+./sum
 ```
 
-V1  Single-process MapReduce
-        ↓
-V2  Multi-threaded MapReduce
-        ↓
-V3  Multi-process MapReduce
-        ↓
-V4  Distributed MapReduce over TCP
-        ↓
-V5  Fault-tolerant MapReduce
+## 2 FEATURE
+
+- [X] Single-process MapReduce
+- [ ] Multi-threaded MapReduce
+- [ ] Multi-process MapReduce
+- [ ] Distributed MapReduce over TCP
+- [ ] Fault-tolerant MapReduce

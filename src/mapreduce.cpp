@@ -16,6 +16,17 @@ void MapReduce::Run(const std::vector<std::string>& inputFiles,const std::string
     this->reducePhase(grouped,outFile);
 }
 
+/**
+ * input.txt:
+ *   hello world
+ *   hello mapreduce
+ *
+ * intermediate:
+ *   hello 1
+ *   world 1
+ *   hello 1
+ *   mapreduce 1
+ */
 std::vector<KeyValue> MapReduce::mapPhase(const std::vector<std::string>& inputFiles){
     std::vector<KeyValue> intermediate;
     for(const auto& filename:inputFiles){
@@ -33,11 +44,24 @@ std::vector<KeyValue> MapReduce::mapPhase(const std::vector<std::string>& inputF
 }
 
 std::map<Key,std::vector<Value>> MapReduce::shufflePhase(std::vector<KeyValue> intermediate){
+    /**
+     * after sorting:
+     *   hello 1
+     *   hello 1
+     *   world 1
+     *   mapreduce 1
+     */
     std::sort(intermediate.begin(),intermediate.end(),
         [](const KeyValue& a,const KeyValue& b){
             return a.first<b.first;
         }
     );
+    /**
+     * after group:
+     *   hello [1, 1]
+     *   world [1]
+     *   mapreduce [1]
+     */
     std::map<Key,std::vector<Value>> grouped;
     for(const auto& [k,v]:intermediate){
         grouped[k].push_back(v);

@@ -14,8 +14,16 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+include(${CMAKE_SOURCE_DIR}/cmake/AssertCpy.cmake)
+
 add_subdirectory(src)
 
-add_executable(${PROJECT_NAME} main.cpp)
+add_executable(wordCount wordCount.cpp)
+target_link_libraries(wordCount PRIVATE mapreduce)
+add_asset_copy_target(wordCount "${CMAKE_CURRENT_SOURCE_DIR}/asset")
+add_dependencies(wordCount ${ASSET_COPY_TARGET})
 
-target_link_libraries(${PROJECT_NAME} PRIVATE mapreduce)
+add_executable(sum sum.cpp)
+target_link_libraries(sum PRIVATE mapreduce)
+add_asset_copy_target(sum "${CMAKE_CURRENT_SOURCE_DIR}/asset")
+add_dependencies(sum ${ASSET_COPY_TARGET})
