@@ -28,7 +28,7 @@ ctest --test-dir build --output-on-failure
 ## 2 FEATURE
 
 - [X] Single-process MapReduce
-- [ ] Multi-threaded MapReduce
+- [X] Multi-threaded MapReduce (parallel Map tasks)
 - [ ] Multi-process MapReduce
 - [ ] Distributed MapReduce over TCP
 - [ ] Fault-tolerant MapReduce

@@ -26,8 +26,13 @@ int main() {
         return std::vector<KeyValue>({{word,std::to_string(count)}});
     };
 
-    MapReduce job(mapper,reducer);
-    job.Run({"asset/wordCount.txt"},"wordCount.txt");
+    MapReduce job(mapper,reducer,4);
+    job.Run({
+        "asset/wordCount1.txt",
+        "asset/wordCount2.txt",
+        "asset/wordCount3.txt",
+    },
+        "wordCount.txt");
 
     std::cout<<"WordCount compledted"<<std::endl;
 

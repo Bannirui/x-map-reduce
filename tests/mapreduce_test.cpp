@@ -61,25 +61,38 @@ int main() {
     fs::remove_all(dir);
     fs::create_directories(dir);
 
-    const fs::path inputFile = dir / "input.txt";
-    const fs::path outputFile = dir / "output.txt";
+    // M = 3 map tasks (one per input file), as in the V2 API.
+    const std::vector<fs::path> inputs = {dir / "in0.txt", dir / "in1.txt", dir / "in2.txt"};
     {
-        std::ofstream input(inputFile);
-        input << "hello world\nhello mapreduce\n";
+        std::ofstream(inputs[0]) << "hello world\nhello mapreduce\n";
+        std::ofstream(inputs[1]) << "hello distributed\n";
+        std::ofstream(inputs[2]) << "mapreduce scales\n";
     }
 
-    MapReduce job(wordMapper, countReducer);
-    job.Run({inputFile.string()}, outputFile.string());
+    std::vector<std::string> inputPaths;
+    for (const auto& path : inputs) {
+        inputPaths.push_back(path.string());
+    }
 
-    const auto counts = readOutput(outputFile);
-    check(counts.size() == 3, "expected 3 distinct words");
-    check(counts.count("hello") == 1 && counts.at("hello") == "2", "hello should be counted twice");
+    const fs::path serialOutput = dir / "serial.txt";
+    const fs::path parallelOutput = dir / "parallel.txt";
+    MapReduce serialJob(wordMapper, countReducer, 1);
+    MapReduce parallelJob(wordMapper, countReducer, 4);
+    serialJob.Run(inputPaths, serialOutput.string());
+    parallelJob.Run(inputPaths, parallelOutput.string());
+
+    const auto counts = readOutput(serialOutput);
+    check(counts.size() == 5, "expected 5 distinct words");
+    check(counts.count("hello") == 1 && counts.at("hello") == "3", "hello should be counted three times");
     check(counts.count("world") == 1 && counts.at("world") == "1", "world should be counted once");
-    check(counts.count("mapreduce") == 1 && counts.at("mapreduce") == "1", "mapreduce should be counted once");
+    check(counts.count("mapreduce") == 1 && counts.at("mapreduce") == "2", "mapreduce should be counted twice");
+    check(counts.count("distributed") == 1 && counts.at("distributed") == "1", "distributed should be counted once");
+    check(counts.count("scales") == 1 && counts.at("scales") == "1", "scales should be counted once");
+    check(readOutput(parallelOutput) == counts, "parallel map must match serial output");
 
     bool threw = false;
     try {
-        job.Run({(dir / "missing.txt").string()}, outputFile.string());
+        parallelJob.Run({(dir / "missing.txt").string()}, parallelOutput.string());
     } catch (const std::runtime_error&) {
         threw = true;
     }
