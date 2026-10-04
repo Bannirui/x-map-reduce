@@ -1,3 +1,5 @@
+#include "mapreduce.h"
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -58,6 +60,19 @@ std::map<std::string, std::string> readOutput(const fs::path& path) {
     return result;
 }
 
+std::set<std::string> keysIn(const fs::path& path) {
+    std::set<std::string> keys;
+    std::ifstream input(path);
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto tab = line.find('\t');
+        if (tab != std::string::npos) {
+            keys.insert(line.substr(0, tab));
+        }
+    }
+    return keys;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -71,19 +86,25 @@ int main(int argc, char** argv) {
     fs::remove_all(dir);
     fs::create_directories(dir);
 
+    const std::size_t reducers = 3;
     const std::vector<fs::path> inputs = {dir / "in0.txt", dir / "in1.txt", dir / "in2.txt"};
     {
         std::ofstream(inputs[0]) << "hello world\nhello mapreduce\n";
         std::ofstream(inputs[1]) << "hello distributed\n";
         std::ofstream(inputs[2]) << "mapreduce scales\n";
     }
+    const std::vector<std::set<std::string>> expectedInputKeys = {
+        {"hello", "world", "mapreduce"},
+        {"hello", "distributed"},
+        {"mapreduce", "scales"},
+    };
 
     const fs::path workDir = dir / "work";
     const fs::path output = dir / "out.txt";
 
     std::vector<std::string> args = {
         "--job", "word_count",
-        "--reducers", "3",
+        "--reducers", std::to_string(reducers),
         "--work-dir", workDir.string(),
         "--output", output.string(),
     };
@@ -101,39 +122,38 @@ int main(int argc, char** argv) {
     check(counts.count("mapreduce") == 1 && counts.at("mapreduce") == "2", "mapreduce should be counted twice");
     check(counts.count("distributed") == 1 && counts.at("distributed") == "1", "distributed should be counted once");
     check(counts.count("scales") == 1 && counts.at("scales") == "1", "scales should be counted once");
-    check(fs::exists(workDir / "map-0.txt") && fs::exists(workDir / "map-1.txt")
-              && fs::exists(workDir / "map-2.txt"),
-          "one intermediate file per input should be produced");
 
-    // Each key must land in exactly one reduce partition.
-    const std::vector<fs::path> parts = {
-        workDir / "part-0.txt", workDir / "part-1.txt", workDir / "part-2.txt"};
-    auto keysIn = [](const fs::path& path) {
-        std::set<std::string> keys;
-        std::ifstream in(path);
-        std::string line;
-        while (std::getline(in, line)) {
-            const auto tab = line.find('\t');
-            if (tab != std::string::npos) {
-                keys.insert(line.substr(0, tab));
+    // Map side: map-i-part-r must contain only keys where partitionOf(key, R) == r.
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        std::map<std::string, std::size_t> foundIn;
+        for (std::size_t r = 0; r < reducers; ++r) {
+            const fs::path path = workDir / ("map-" + std::to_string(i) + "-part-" + std::to_string(r) + ".txt");
+            check(fs::exists(path), "map partition should exist: " + path.filename().string());
+            for (const auto& key : keysIn(path)) {
+                ++foundIn[key];
+                check(partitionOf(key, reducers) == r,
+                      key + " is in the wrong map partition");
             }
         }
-        return keys;
-    };
-    std::vector<std::set<std::string>> partitions;
-    for (const auto& part : parts) {
-        check(fs::exists(part), "reduce part should exist: " + part.filename().string());
-        partitions.push_back(keysIn(part));
-    }
-    std::map<std::string, int> keyCounts;
-    for (const auto& keys : partitions) {
-        for (const auto& key : keys) {
-            ++keyCounts[key];
+        check(foundIn.size() == expectedInputKeys[i].size(),
+              "map task " + std::to_string(i) + " should cover its input keys");
+        for (const auto& [key, count] : foundIn) {
+            check(count == 1, "key must appear in exactly one map partition: " + key);
         }
     }
-    check(keyCounts.size() == 5, "partitions should cover all 5 keys");
-    for (const auto& [key, count] : keyCounts) {
-        check(count == 1, "key must appear in exactly one partition: " + key);
+
+    // Reduce side: part-r outputs are disjoint per partition and cover all keys.
+    std::map<std::string, std::size_t> reduceFoundIn;
+    for (std::size_t r = 0; r < reducers; ++r) {
+        const fs::path path = workDir / ("part-" + std::to_string(r) + ".txt");
+        check(fs::exists(path), "reduce part should exist: " + path.filename().string());
+        for (const auto& key : keysIn(path)) {
+            ++reduceFoundIn[key];
+        }
+    }
+    check(reduceFoundIn.size() == 5, "reduce parts should cover all 5 keys");
+    for (const auto& [key, count] : reduceFoundIn) {
+        check(count == 1, "key must appear in exactly one reduce part: " + key);
     }
 
     fs::remove_all(dir);

@@ -2,6 +2,7 @@
 #include"mapreduce.h"
 
 #include<iostream>
+#include<iterator>
 #include<string>
 #include<utility>
 #include<vector>
@@ -9,35 +10,25 @@
 namespace {
 
 void usage(const char* program){
-    std::cerr<<"Usage: "<<program
-             <<" --job <name> --index <r> --reducers <R> --output <file> <intermediate...>\n";
+    std::cerr<<"Usage: "<<program<<" --job <name> --output <file> <intermediate...>\n";
 }
 
 }  // namespace
 
 /**
- * V3.1 Reduce worker process. Reads every intermediate file, keeps only the
- * keys that belong to partition `index` out of `reducers` (fnv(key) % R), and
- * reduces them into a sorted part file. V3.2 will make map workers pre-split
- * the intermediates so a reducer only reads its own files.
+ * V3.2 Reduce worker process. The map side already partitioned the data, so a
+ * reducer just reduces the intermediate files it is given (its own partition
+ * across every map task) into a sorted part file.
  */
 int main(int argc,char** argv){
     std::string jobName;
     std::string outputFile;
-    std::size_t index=0;
-    std::size_t reducers=1;
-    bool hasIndex=false;
     std::vector<std::string> intermediates;
 
     for(int i=1;i<argc;++i){
         const std::string arg=argv[i];
         if(arg=="--job"&&i+1<argc){
             jobName=argv[++i];
-        }else if(arg=="--index"&&i+1<argc){
-            index=std::stoul(argv[++i]);
-            hasIndex=true;
-        }else if(arg=="--reducers"&&i+1<argc){
-            reducers=std::stoul(argv[++i]);
         }else if(arg=="--output"&&i+1<argc){
             outputFile=argv[++i];
         }else{
@@ -45,8 +36,7 @@ int main(int argc,char** argv){
         }
     }
 
-    if(jobName.empty()||outputFile.empty()||intermediates.empty()
-       ||!hasIndex||reducers==0||index>=reducers){
+    if(jobName.empty()||outputFile.empty()||intermediates.empty()){
         usage(argv[0]);
         return 2;
     }
@@ -61,11 +51,9 @@ int main(int argc,char** argv){
         std::vector<KeyValue> intermediate;
         for(const auto& path:intermediates){
             auto pairs=ReadKeyValues(path);
-            for(auto& pair:pairs){
-                if(partitionOf(pair.first,reducers)==index){
-                    intermediate.push_back(std::move(pair));
-                }
-            }
+            intermediate.insert(intermediate.end(),
+                std::make_move_iterator(pairs.begin()),
+                std::make_move_iterator(pairs.end()));
         }
         MapReduce jobRunner(job->mapper,job->reducer);
         jobRunner.ShuffleAndReduce(std::move(intermediate),outputFile);

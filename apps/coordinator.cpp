@@ -1,5 +1,6 @@
 #include"jobs.h"
 #include"mapreduce.h"
+#include"paths.h"
 
 #include<algorithm>
 #include<cerrno>
@@ -70,13 +71,14 @@ void waitFor(const std::vector<pid_t>& children){
 }  // namespace
 
 /**
- * V3.1 coordinator: forks one map_worker per input file, waits, then forks R
- * reduce_worker processes (each keeps fnv(key) % R == its index), waits, and
- * merges their sorted part files into one key-ordered output.
+ * V3.2 coordinator: forks one map_worker per input file. Each map worker writes
+ * R partition files (fnv(key) % R). After the map barrier, the coordinator forks
+ * R reduce_worker processes, giving reduce worker r only the map-<i>-part-r
+ * files, then merges their sorted parts into one key-ordered output.
  *
- *   coordinator ──> map_worker 0..N ──> map-<i>.txt
+ *   coordinator ──> map_worker i ──> map-i-part-0..R-1
  *                       (waitpid all)
- *   coordinator ──> reduce_worker 0..R-1 ──> part-<r>.txt
+ *   coordinator ──> reduce_worker r reads map-*-part-r ──> part-r
  *                       (waitpid all)
  *                       merge sorted parts -> output
  */
@@ -123,31 +125,30 @@ int main(int argc,char** argv){
         fs::create_directories(workDir);
         const fs::path execDir=executableDir();
 
-        // Map phase: one process per input file.
+        // Map phase: one process per input file; each writes R partition files.
         std::vector<pid_t> mapChildren;
-        std::vector<fs::path> intermediates;
         for(std::size_t i=0;i<inputs.size();++i){
-            const fs::path intermediate=workDir/("map-"+std::to_string(i)+".txt");
-            intermediates.push_back(intermediate);
             mapChildren.push_back(spawnProcess(execDir/"map_worker",
-                {"--job",jobName,inputs[i],intermediate.string()}));
+                {"--job",jobName,
+                 "--task",std::to_string(i),
+                 "--reducers",std::to_string(reducers),
+                 "--output-dir",workDir.string(),
+                 inputs[i]}));
         }
         waitFor(mapChildren);
 
-        // Reduce phase: R processes, each filtering its partition.
+        // Reduce phase: R processes, each reading only its own partition files.
         std::vector<pid_t> reduceChildren;
         std::vector<fs::path> parts;
         for(std::size_t r=0;r<reducers;++r){
-            const fs::path part=workDir/("part-"+std::to_string(r)+".txt");
+            const fs::path part=mrapp::reducePartPath(workDir,r);
             parts.push_back(part);
             std::vector<std::string> args{
                 "--job",jobName,
-                "--index",std::to_string(r),
-                "--reducers",std::to_string(reducers),
                 "--output",part.string(),
             };
-            for(const auto& intermediate:intermediates){
-                args.push_back(intermediate.string());
+            for(std::size_t i=0;i<inputs.size();++i){
+                args.push_back(mrapp::mapPartPath(workDir,i,r).string());
             }
             reduceChildren.push_back(spawnProcess(execDir/"reduce_worker",args));
         }
