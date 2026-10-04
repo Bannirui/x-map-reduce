@@ -10,14 +10,19 @@ refer to https://static.googleusercontent.com/media/research.google.com/en//arch
 ```sh
 chmod +x ./build.sh
 ./build.sh
+```
 
-# word count
-cd ./build/bin
-./wordCount
+and i've provided few samples for u
 
-# calculate
+```sh
+# examples (assets are copied next to the binaries)
 cd ./build/bin
+./word_count
 ./sum
+
+# run the test suite
+cd <repo>
+ctest --test-dir build --output-on-failure
 ```
 
 ## 2 FEATURE

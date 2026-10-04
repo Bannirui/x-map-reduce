@@ -1,0 +1,3 @@
+add_executable(mapreduce_test mapreduce_test.cpp)
+target_link_libraries(mapreduce_test PRIVATE mapreduce)
+add_test(NAME mapreduce_test COMMAND mapreduce_test)
