@@ -20,6 +20,10 @@ cd ./build/bin
 ./word_count
 ./sum
 
+# multi-process (V3.0): one map_worker process per input file
+./coordinator --job word_count --work-dir /tmp/mr --output out.txt asset/wordCount1.txt asset/wordCount2.txt asset/wordCount3.txt
+./coordinator --job sum --work-dir /tmp/mr --output sum.txt asset/sum.txt
+
 # run the test suite
 cd <repo>
 ctest --test-dir build --output-on-failure
@@ -27,8 +31,11 @@ ctest --test-dir build --output-on-failure
 
 ## 2 FEATURE
 
-- [X] Single-process MapReduce
-- [X] Multi-threaded MapReduce (parallel Map tasks)
-- [ ] Multi-process MapReduce
-- [ ] Distributed MapReduce over TCP
-- [ ] Fault-tolerant MapReduce
+- [X] V1 Single-process MapReduce
+- [X] V2 Multi-threaded MapReduce (parallel Map tasks)
+- [ ] V3 Multi-process MapReduce
+  - [X] V3.0: multi-process Map (`fork`/`exec` one `map_worker` per input file)
+  - [ ] V3.1: Map + Reduce processes
+  - [ ] V3.2: partition intermediate data (`hash(key) % R`)
+- [ ] V4 Distributed MapReduce over TCP
+- [ ] V5 Fault-tolerant MapReduce

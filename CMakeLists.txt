@@ -20,6 +20,7 @@ include(CTest)
 
 add_subdirectory(src)
 add_subdirectory(examples)
+add_subdirectory(apps)
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

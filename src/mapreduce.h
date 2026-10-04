@@ -12,9 +12,13 @@ class MapReduce {
 public:
     // workers == 0 means use std::thread::hardware_concurrency().
     explicit MapReduce(MapFunction mapper,ReduceFunction reducer,std::size_t workers=0);
+    // In-process pipeline: Map -> Shuffle -> Reduce.
     void Run(const std::vector<std::string>& inputFiles,const std::string& outFile);
+    // V3: Map only (used by map_worker processes).
+    std::vector<KeyValue> Map(const std::vector<std::string>& inputFiles) const;
+    // V3: Shuffle + Reduce over already-collected intermediate data.
+    void ShuffleAndReduce(std::vector<KeyValue> intermediate,const std::string& outFile);
 private:
-    std::vector<KeyValue> mapPhase(const std::vector<std::string>& inputFiles);
     std::map<Key,std::vector<Value>> shufflePhase(std::vector<KeyValue> intermediate);
     void reducePhase(const std::map<Key,std::vector<Value>>& grouped,const std::string& outputFile);
     std::size_t resolveWorkers(std::size_t tasks) const;
@@ -23,3 +27,7 @@ private:
     ReduceFunction reducer_;
     std::size_t workers_;
 };
+
+// Plain "key\tvalue\n" intermediate file format (V3).
+void WriteKeyValues(const std::string& path,const std::vector<KeyValue>& pairs);
+std::vector<KeyValue> ReadKeyValues(const std::string& path);

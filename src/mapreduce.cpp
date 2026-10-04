@@ -53,7 +53,11 @@ MapReduce::MapReduce(MapFunction mapper,ReduceFunction reducer,std::size_t worke
 {}
 
 void MapReduce::Run(const std::vector<std::string>& inputFiles,const std::string& outFile){
-    auto intermediate=this->mapPhase(inputFiles);
+    auto intermediate=this->Map(inputFiles);
+    this->ShuffleAndReduce(std::move(intermediate),outFile);
+}
+
+void MapReduce::ShuffleAndReduce(std::vector<KeyValue> intermediate,const std::string& outFile){
     auto grouped=this->shufflePhase(std::move(intermediate));
     this->reducePhase(grouped,outFile);
 }
@@ -70,7 +74,7 @@ void MapReduce::Run(const std::vector<std::string>& inputFiles,const std::string
  *             │
  *   per-file intermediate data (in memory)
  */
-std::vector<KeyValue> MapReduce::mapPhase(const std::vector<std::string>& inputFiles){
+std::vector<KeyValue> MapReduce::Map(const std::vector<std::string>& inputFiles) const{
     const std::size_t workers=this->resolveWorkers(inputFiles.size());
     std::vector<std::vector<KeyValue>> perFile(inputFiles.size());
 
@@ -149,4 +153,34 @@ std::size_t MapReduce::resolveWorkers(std::size_t tasks) const{
         workers=1;
     }
     return std::min(workers,tasks);
+}
+
+void WriteKeyValues(const std::string& path,const std::vector<KeyValue>& pairs){
+    std::ofstream output(path);
+    if(!output){
+        throw std::runtime_error("Failed to open intermediate file: "+path);
+    }
+    for(const auto& [key,value]:pairs){
+        output<<key<<'\t'<<value<<'\n';
+    }
+    if(!output){
+        throw std::runtime_error("Failed to write intermediate file: "+path);
+    }
+}
+
+std::vector<KeyValue> ReadKeyValues(const std::string& path){
+    std::ifstream input(path);
+    if(!input){
+        throw std::runtime_error("Failed to open intermediate file: "+path);
+    }
+    std::vector<KeyValue> pairs;
+    std::string line;
+    while(std::getline(input,line)){
+        const auto tab=line.find('\t');
+        if(tab==std::string::npos){
+            continue;
+        }
+        pairs.emplace_back(line.substr(0,tab),line.substr(tab+1));
+    }
+    return pairs;
 }
