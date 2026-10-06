@@ -19,6 +19,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/AssetCopy.cmake)
 include(CTest)
 
 add_subdirectory(src)
+add_subdirectory(net)
 add_subdirectory(examples)
 add_subdirectory(apps)
 
