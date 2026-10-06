@@ -93,14 +93,15 @@ std::vector<KeyValue> deserializeKeyValues(const std::string& blob){
     return pairs;
 }
 
-std::vector<std::vector<KeyValue>> runMapTask(const Task& task){
+std::vector<std::vector<KeyValue>> runMapTask(const Task& task,const std::string& content){
     const Job* job=findJob(task.job);
     if(job==nullptr){
         throw std::runtime_error("unknown job '"+task.job+"'");
     }
-    // Map one file, then bucket the pairs by fnv(key) % R.
+    // Map the received split, then bucket the pairs by fnv(key) % R. The bytes
+    // come from the coordinator (V4.3), so the worker needs no input file.
     MapReduce runner(job->mapper,job->reducer);
-    auto pairs=runner.Map({task.input});
+    auto pairs=runner.MapData(task.input,content);
 
     std::vector<std::vector<KeyValue>> parts(task.reducers);
     for(auto& pair:pairs){

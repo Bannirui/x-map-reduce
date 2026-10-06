@@ -6,6 +6,7 @@
 #include<algorithm>
 #include<cerrno>
 #include<cstdint>
+#include<fstream>
 #include<iostream>
 #include<iterator>
 #include<poll.h>
@@ -126,6 +127,20 @@ int main(int argc,char** argv){
     }
 
     try{
+        // V4.3: the coordinator owns the inputs (it is the submitter); each
+        // worker fetches its split over TCP instead of reading a local path.
+        std::vector<std::string> inputData;
+        inputData.reserve(inputs.size());
+        for(const auto& path:inputs){
+            std::ifstream in(path,std::ios::binary);
+            if(!in){
+                throw std::runtime_error("failed to open input file: "+path);
+            }
+            inputData.emplace_back(
+                std::istreambuf_iterator<char>(in),
+                std::istreambuf_iterator<char>());
+        }
+
         const auto [host,port]=parseEndpoint(listen);
         xmr::net::Listener listener(host,port);
         // Report the real port (--listen port 0 picks an ephemeral one) so the
@@ -182,6 +197,14 @@ int main(int argc,char** argv){
                     throw std::runtime_error("FETCH out of range");
                 }
                 worker.connection.send(toBytes("DATA\t"+mapOutput[task][partition]));
+            }else if(command=="INPUT"){
+                std::string tail;
+                const auto fields=splitHead(rest,1,tail);
+                const std::size_t id=std::stoul(fields[0]);
+                if(id>=inputData.size()){
+                    throw std::runtime_error("INPUT out of range");
+                }
+                worker.connection.send(toBytes("DATA\t"+inputData[id]));
             }else if(command=="RESULT"){
                 std::string blob;
                 const auto fields=splitHead(rest,1,blob);

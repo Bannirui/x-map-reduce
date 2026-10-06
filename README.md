@@ -55,8 +55,11 @@ start workers
 - [X] V1 Single-process MapReduce
 - [X] V2 Multi-threaded MapReduce (parallel Map tasks)
 - [X] V3 Multi-process MapReduce
-  - [X] V3.0: multi-process Map (`fork`/`exec` one `map_worker` per input file)
-  - [X] V3.1: Map + Reduce processes (`reduce_worker` filters `fnv(key) % R`)
-  - [X] V3.2: partition intermediate data at the map side (`fnv(key) % R`)
-- [ ] V4 Distributed MapReduce over TCP
+  - [X] V3.0 multi-process Map(`fork`/`exec` one `map_worker` per input file)
+  - [X] V3.1 Map+Reduce processes(`reduce_worker` filters `fnv(key) % R`)
+  - [X] V3.2 partition intermediate data at the map side(`fnv(key) % R`)
+- [X] V4 Distributed MapReduce over TCP
+  - [X] V4.0 master on tcp
+  - [X] V4.1 data shuffle on tcp
+  - [X] V4.2 distributed input data
 - [ ] V5 Fault-tolerant MapReduce

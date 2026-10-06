@@ -16,6 +16,8 @@ public:
     void Run(const std::vector<std::string>& inputFiles,const std::string& outFile);
     // V3: Map only (used by map_worker processes).
     std::vector<KeyValue> Map(const std::vector<std::string>& inputFiles) const;
+    // V4.3: map in-memory content (one mapper call per line) instead of a file.
+    std::vector<KeyValue> MapData(const std::string& inputName,const std::string& content) const;
     // V3: Shuffle + Reduce over already-collected intermediate data.
     void ShuffleAndReduce(std::vector<KeyValue> intermediate,const std::string& outFile);
     // V4.2: Shuffle + Reduce over already-collected pairs, returning the result

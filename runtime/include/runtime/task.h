@@ -33,8 +33,8 @@ struct Task {
 std::string serializeKeyValues(const std::vector<KeyValue>& pairs);
 std::vector<KeyValue> deserializeKeyValues(const std::string& blob);
 
-// Map task: map the single input file and return one bucket per reducer.
-std::vector<std::vector<KeyValue>> runMapTask(const Task& task);
+// Map task: map the received input content and return one bucket per reducer.
+std::vector<std::vector<KeyValue>> runMapTask(const Task& task,const std::string& content);
 
 // Reduce task: fetch each map task's partition through `fetch`, then
 // shuffle+reduce into the final key-ordered pairs.

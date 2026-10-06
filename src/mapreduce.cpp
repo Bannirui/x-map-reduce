@@ -105,6 +105,30 @@ std::vector<KeyValue> MapReduce::Map(const std::vector<std::string>& inputFiles)
     return intermediate;
 }
 
+std::vector<KeyValue> MapReduce::MapData(const std::string& inputName,const std::string& content) const{
+    // Same per-line contract as the file path, but the bytes are already in
+    // memory (V4.3: a map worker receives its input split over TCP).
+    std::vector<KeyValue> intermediate;
+    std::size_t start=0;
+    while(start<content.size()){
+        const std::size_t newline=content.find('\n',start);
+        const std::size_t end=(newline==std::string::npos)?content.size():newline;
+        std::string line=content.substr(start,end-start);
+        if(!line.empty()&&line.back()=='\r'){
+            line.pop_back();
+        }
+        auto pairs=this->mapper_(inputName,line);
+        intermediate.insert(intermediate.end(),
+            std::make_move_iterator(pairs.begin()),
+            std::make_move_iterator(pairs.end()));
+        if(newline==std::string::npos){
+            break;
+        }
+        start=newline+1;
+    }
+    return intermediate;
+}
+
 std::map<Key,std::vector<Value>> MapReduce::shufflePhase(std::vector<KeyValue> intermediate){
     /**
      * after sorting:

@@ -79,7 +79,13 @@ int main(int argc,char** argv){
             const mrapp::Task task=mrapp::Task::deserialize(message.substr(5));
             try{
                 if(task.kind==mrapp::TaskKind::Map){
-                    const auto parts=mrapp::runMapTask(task);
+                    // Fetch this map task's input split from the coordinator.
+                    connection.send(toBytes("INPUT\t"+std::to_string(task.id)));
+                    const std::string input=toString(connection.receive());
+                    if(input.rfind("DATA\t",0)!=0){
+                        throw std::runtime_error("expected DATA reply from coordinator");
+                    }
+                    const auto parts=mrapp::runMapTask(task,input.substr(5));
                     for(std::size_t r=0;r<parts.size();++r){
                         connection.send(toBytes("MAPOUT\t"+std::to_string(task.id)+"\t"
                             +std::to_string(r)+"\t"+mrapp::serializeKeyValues(parts[r])));
