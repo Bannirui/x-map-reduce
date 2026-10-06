@@ -21,8 +21,16 @@ cd ./build/bin
 ./sum
 
 # multi-process (V3.2): map_worker per input partitions by fnv(key)%R; R reduce_worker processes
-./coordinator --job word_count --reducers 3 --work-dir /tmp/mr --output out.txt asset/wordCount1.txt asset/wordCount2.txt asset/wordCount3.txt
-./coordinator --job sum --reducers 3 --work-dir /tmp/mr --output sum.txt asset/sum.txt
+./coordinator --job word_count \
+  --reducers 3 \
+  --work-dir mr/wordcount \
+  --output wc.txt \
+  asset/wordCount1.txt asset/wordCount2.txt asset/wordCount3.txt
+./coordinator --job sum \
+  --reducers 3 \
+  --work-dir mr/calculate \
+  --output sum.txt \
+  asset/sum.txt
 
 # run the test suite
 cd <repo>
