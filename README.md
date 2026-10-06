@@ -10,31 +10,44 @@ refer to https://static.googleusercontent.com/media/research.google.com/en//arch
 ```sh
 chmod +x ./build.sh
 ./build.sh
-```
 
-and i've provided few samples for u
-
-```sh
-# examples (assets are copied next to the binaries)
-cd ./build/bin
-./word_count
-./sum
-
-# multi-process (V3.2): map_worker per input partitions by fnv(key)%R; R reduce_worker processes
-./coordinator --job word_count \
-  --reducers 3 \
-  --work-dir mr/wordcount \
-  --output wc.txt \
-  asset/wordCount1.txt asset/wordCount2.txt asset/wordCount3.txt
-./coordinator --job sum \
-  --reducers 3 \
-  --work-dir mr/calculate \
-  --output sum.txt \
-  asset/sum.txt
 
 # run the test suite
 cd <repo>
 ctest --test-dir build --output-on-failure
+```
+
+and i've provided few samples for u
+
+### 1.1 only one binary
+
+```sh
+cd ./build/bin
+
+./word_count
+./sum
+```
+
+### 1.2 master and worker
+
+#### 1.2.1 start master
+
+```sh
+./coordinator --job word_count \
+  --workers 3 \
+  --reducers 3 \
+  --listen 127.0.0.1:9527 \
+  --work-dir mr/wc \
+  --output wc.txt \
+  asset/wordCount1.txt asset/wordCount2.txt asset/wordCount3.txt
+```
+
+#### 1.2.1 start master
+
+start workers
+
+```sh
+./worker --coordinator 127.0.0.1:9527
 ```
 
 ## 2 FEATURE

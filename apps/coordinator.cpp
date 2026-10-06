@@ -1,18 +1,24 @@
-#include"jobs.h"
-#include"mapreduce/mapreduce.h"
-#include"paths.h"
+#include"net/net.h"
+#include"runtime/jobs.h"
+#include"runtime/paths.h"
+#include"runtime/scheduler.h"
+#include"runtime/task.h"
 
 #include<algorithm>
 #include<cerrno>
+#include<cstdint>
 #include<filesystem>
 #include<iostream>
 #include<iterator>
+#include<poll.h>
 #include<stdexcept>
 #include<string>
+#include<utility>
 #include<vector>
 
-#include<sys/wait.h>
 #include<unistd.h>
+
+#include<sys/socket.h>
 
 namespace fs=std::filesystem;
 
@@ -20,73 +26,77 @@ namespace {
 
 void usage(const char* program){
     std::cerr<<"Usage: "<<program
-             <<" --job <name> [--reducers <R>] --work-dir <dir> --output <file> <input...>\n";
+             <<" --job <name> [--reducers <R>] [--workers <N>] [--listen <host:port>]"
+             <<" [--work-dir <dir>] --output <file> <input...>\n";
 }
 
-// Directory holding this executable, so map_worker / reduce_worker are found as
-// siblings regardless of the current working directory.
-fs::path executableDir(){
-    std::error_code error;
-    const auto self=fs::read_symlink("/proc/self/exe",error);
-    if(!error&&!self.empty()){
-        return self.parent_path();
+std::pair<std::string,std::uint16_t> parseEndpoint(const std::string& endpoint){
+    const auto colon=endpoint.rfind(':');
+    if(colon==std::string::npos){
+        throw std::runtime_error("expected host:port in '"+endpoint+"'");
     }
-    return fs::current_path();
+    return {endpoint.substr(0,colon),
+            static_cast<std::uint16_t>(std::stoul(endpoint.substr(colon+1)))};
 }
 
-pid_t spawnProcess(const fs::path& program,const std::vector<std::string>& args){
-    const pid_t pid=fork();
-    if(pid<0){
-        throw std::runtime_error("fork failed");
-    }
-    if(pid==0){
-        std::vector<char*> argv;
-        argv.reserve(args.size()+2);
-        argv.push_back(const_cast<char*>(program.c_str()));
-        for(const auto& arg:args){
-            argv.push_back(const_cast<char*>(arg.c_str()));
+std::vector<std::string> splitTab(const std::string& text){
+    std::vector<std::string> fields;
+    std::size_t start=0;
+    while(true){
+        const std::size_t tab=text.find('\t',start);
+        if(tab==std::string::npos){
+            fields.push_back(text.substr(start));
+            break;
         }
-        argv.push_back(static_cast<char*>(nullptr));
-        execv(program.c_str(),argv.data());
-        // execv only returns on failure; _exit avoids flushing inherited stdio.
-        _exit(127);
+        fields.push_back(text.substr(start,tab-start));
+        start=tab+1;
     }
-    return pid;
+    return fields;
 }
 
-void waitFor(const std::vector<pid_t>& children){
-    for(const pid_t pid:children){
-        int status=0;
-        while(waitpid(pid,&status,0)==-1){
-            if(errno!=EINTR){
-                throw std::runtime_error("waitpid failed");
-            }
-        }
-        if(!WIFEXITED(status)||WEXITSTATUS(status)!=0){
-            throw std::runtime_error("worker exited abnormally");
-        }
+mrapp::TaskKind kindOf(const std::string& token){
+    if(token=="MAP"){
+        return mrapp::TaskKind::Map;
     }
+    if(token=="REDUCE"){
+        return mrapp::TaskKind::Reduce;
+    }
+    throw std::runtime_error("bad task kind '"+token+"'");
 }
+
+std::vector<std::uint8_t> toBytes(const std::string& text){
+    return std::vector<std::uint8_t>(text.begin(),text.end());
+}
+
+std::string toString(const std::vector<std::uint8_t>& bytes){
+    return std::string(bytes.begin(),bytes.end());
+}
+
+struct Worker {
+    xmr::net::Connection connection;
+    bool idle=false;  // sent REQUEST, waiting for a task
+};
 
 }  // namespace
 
 /**
- * V3.2 coordinator: forks one map_worker per input file. Each map worker writes
- * R partition files (fnv(key) % R). After the map barrier, the coordinator forks
- * R reduce_worker processes, giving reduce worker r only the map-<i>-part-r
- * files, then merges their sorted parts into one key-ordered output.
+ * V4.1 coordinator: a single-threaded control plane. It listens for persistent
+ * workers, hands them map tasks then reduce tasks through an in-process
+ * Scheduler, and merges the reduce part files into the final output. The
+ * intermediate data still travels through the shared work dir; moving it to
+ * TCP is V4.2.
  *
- *   coordinator ──> map_worker i ──> map-i-part-0..R-1
- *                       (waitpid all)
- *   coordinator ──> reduce_worker r reads map-*-part-r ──> part-r
- *                       (waitpid all)
- *                       merge sorted parts -> output
+ *   worker ──connect──> coordinator
+ *   worker ──REQUEST──> coordinator ──TASK──> worker ──DONE──> coordinator
+ *          (map barrier) then (reduce barrier), then STOP + merge
  */
 int main(int argc,char** argv){
     std::string jobName;
     std::string outputFile;
+    std::string listen="127.0.0.1:0";
     fs::path workDir;
     std::size_t reducers=3;
+    std::size_t expectedWorkers=1;
     std::vector<std::string> inputs;
 
     for(int i=1;i<argc;++i){
@@ -95,6 +105,10 @@ int main(int argc,char** argv){
             jobName=argv[++i];
         }else if(arg=="--reducers"&&i+1<argc){
             reducers=std::stoul(argv[++i]);
+        }else if(arg=="--workers"&&i+1<argc){
+            expectedWorkers=std::stoul(argv[++i]);
+        }else if(arg=="--listen"&&i+1<argc){
+            listen=argv[++i];
         }else if(arg=="--work-dir"&&i+1<argc){
             workDir=argv[++i];
         }else if(arg=="--output"&&i+1<argc){
@@ -104,13 +118,13 @@ int main(int argc,char** argv){
         }
     }
 
-    if(jobName.empty()||outputFile.empty()||inputs.empty()||reducers==0){
+    if(jobName.empty()||outputFile.empty()||inputs.empty()
+       ||reducers==0||expectedWorkers==0){
         usage(argv[0]);
         return 2;
     }
 
-    const Job* job=findJob(jobName);
-    if(job==nullptr){
+    if(findJob(jobName)==nullptr){
         std::cerr<<"coordinator: unknown job '"<<jobName<<"'\n";
         return 2;
     }
@@ -123,41 +137,108 @@ int main(int argc,char** argv){
 
     try{
         fs::create_directories(workDir);
-        const fs::path execDir=executableDir();
 
-        // Map phase: one process per input file; each writes R partition files.
-        std::vector<pid_t> mapChildren;
-        for(std::size_t i=0;i<inputs.size();++i){
-            mapChildren.push_back(spawnProcess(execDir/"map_worker",
-                {"--job",jobName,
-                 "--task",std::to_string(i),
-                 "--reducers",std::to_string(reducers),
-                 "--output-dir",workDir.string(),
-                 inputs[i]}));
-        }
-        waitFor(mapChildren);
+        const auto [host,port]=parseEndpoint(listen);
+        xmr::net::Listener listener(host,port);
+        // Report the real port (--listen port 0 picks an ephemeral one) so the
+        // caller knows where to point the workers.
+        std::cout<<"LISTENING "<<host<<":"<<listener.port()<<std::endl;
 
-        // Reduce phase: R processes, each reading only its own partition files.
-        std::vector<pid_t> reduceChildren;
-        std::vector<fs::path> parts;
-        for(std::size_t r=0;r<reducers;++r){
-            const fs::path part=mrapp::reducePartPath(workDir,r);
-            parts.push_back(part);
-            std::vector<std::string> args{
-                "--job",jobName,
-                "--output",part.string(),
-            };
-            for(std::size_t i=0;i<inputs.size();++i){
-                args.push_back(mrapp::mapPartPath(workDir,i,r).string());
+        mrapp::Scheduler scheduler(jobName,inputs,reducers,workDir.string(),outputFile);
+        std::vector<Worker> workers;
+
+        auto handleMessage=[&](Worker& worker){
+            const std::vector<std::string> fields=
+                splitTab(toString(worker.connection.receive()));
+            if(fields.empty()){
+                throw std::runtime_error("empty control message");
             }
-            reduceChildren.push_back(spawnProcess(execDir/"reduce_worker",args));
+            if(fields[0]=="HELLO"){
+                // Registration only; the worker asks for work next.
+            }else if(fields[0]=="REQUEST"){
+                worker.idle=true;
+            }else if(fields[0]=="DONE"&&fields.size()>=3){
+                scheduler.markDone(kindOf(fields[1]));
+                worker.idle=false;
+            }else if(fields[0]=="FAIL"&&fields.size()>=3){
+                const std::string reason=fields.size()>=4?fields[3]:"unknown";
+                scheduler.markFailed(kindOf(fields[1]),std::stoul(fields[2]),reason);
+                worker.idle=false;
+            }else{
+                throw std::runtime_error("unexpected control message '"+fields[0]+"'");
+            }
+        };
+
+        auto dispatch=[&]{
+            // Hold work until the expected workers have all connected, so a
+            // fast worker cannot finish the job before the others join.
+            if(workers.size()<expectedWorkers){
+                return;
+            }
+            for(auto& worker:workers){
+                if(!worker.idle){
+                    continue;
+                }
+                auto task=scheduler.takeTask();
+                if(!task){
+                    break;
+                }
+                worker.connection.send(toBytes("TASK\t"+task->serialize()));
+                worker.idle=false;
+            }
+        };
+
+        while(!scheduler.finished()&&!scheduler.failed()){
+            std::vector<pollfd> fds;
+            fds.push_back(pollfd{listener.fd(),POLLIN,0});
+            for(const auto& worker:workers){
+                fds.push_back(pollfd{worker.connection.fd(),POLLIN,0});
+            }
+
+            const int ready=::poll(fds.data(),static_cast<nfds_t>(fds.size()),-1);
+            if(ready<0){
+                if(errno==EINTR){
+                    continue;
+                }
+                throw std::runtime_error("poll failed");
+            }
+
+            for(std::size_t index=1;index<fds.size();++index){
+                if(fds[index].revents&(POLLIN|POLLHUP|POLLERR)){
+                    handleMessage(workers[index-1]);
+                }
+            }
+
+            if(fds[0].revents&POLLIN){
+                workers.push_back(Worker{listener.accept(),false});
+            }
+
+            dispatch();
         }
-        waitFor(reduceChildren);
+
+        for(auto& worker:workers){
+            try{
+                worker.connection.send(toBytes("STOP"));
+                // Half-close, then drain any in-flight REQUEST so closing the
+                // socket does not reset the connection underneath the worker.
+                ::shutdown(worker.connection.fd(),SHUT_WR);
+                char buffer[256];
+                while(::read(worker.connection.fd(),buffer,sizeof(buffer))>0){
+                }
+            }catch(const std::exception&){
+                // Worker already disconnected; nothing to do at shutdown.
+            }
+        }
+
+        if(scheduler.failed()){
+            std::cerr<<"coordinator: "<<scheduler.error()<<'\n';
+            return 1;
+        }
 
         // Merge the (already individually sorted) part files into one output.
         std::vector<KeyValue> merged;
-        for(const auto& part:parts){
-            auto pairs=ReadKeyValues(part.string());
+        for(std::size_t r=0;r<reducers;++r){
+            auto pairs=ReadKeyValues(mrapp::reducePartPath(workDir,r).string());
             merged.insert(merged.end(),
                 std::make_move_iterator(pairs.begin()),
                 std::make_move_iterator(pairs.end()));

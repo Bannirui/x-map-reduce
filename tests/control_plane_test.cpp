@@ -1,5 +1,7 @@
 #include "mapreduce/mapreduce.h"
 
+#include <cerrno>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -24,13 +26,19 @@ void check(bool condition, const std::string& message) {
     }
 }
 
-int run(const std::string& program, const std::vector<std::string>& args) {
+// Fork/exec `program`; when stdoutFd >= 0 the child's stdout is redirected to
+// it (used to capture the coordinator's LISTENING line).
+pid_t startProcess(const std::string& program,
+                   const std::vector<std::string>& args,
+                   int stdoutFd = -1) {
     const pid_t pid = fork();
     if (pid < 0) {
-        std::cerr << "FAIL: fork failed\n";
         return -1;
     }
     if (pid == 0) {
+        if (stdoutFd >= 0) {
+            ::dup2(stdoutFd, STDOUT_FILENO);
+        }
         std::vector<char*> argv;
         argv.push_back(const_cast<char*>(program.c_str()));
         for (const auto& arg : args) {
@@ -40,11 +48,30 @@ int run(const std::string& program, const std::vector<std::string>& args) {
         execv(program.c_str(), argv.data());
         _exit(127);  // exec failed
     }
+    return pid;
+}
+
+int waitProcess(pid_t pid) {
     int status = 0;
-    while (waitpid(pid, &status, 0) == -1) {
-        // retry on EINTR
+    while (::waitpid(pid, &status, 0) == -1) {
+        if (errno != EINTR) {
+            return -1;
+        }
     }
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+std::string readLine(int fd) {
+    std::string line;
+    char c = '\0';
+    while (true) {
+        const ssize_t n = ::read(fd, &c, 1);
+        if (n <= 0 || c == '\n') {
+            break;
+        }
+        line.push_back(c);
+    }
+    return line;
 }
 
 std::map<std::string, std::string> readOutput(const fs::path& path) {
@@ -76,13 +103,14 @@ std::set<std::string> keysIn(const fs::path& path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "Usage: coordinator_test <path-to-coordinator>\n";
+    if (argc != 3) {
+        std::cerr << "Usage: control_plane_test <path-to-coordinator> <path-to-worker>\n";
         return 2;
     }
     const std::string coordinator = argv[1];
+    const std::string worker = argv[2];
 
-    const fs::path dir = fs::temp_directory_path() / "x-map-reduce-coordinator-test";
+    const fs::path dir = fs::temp_directory_path() / "x-map-reduce-control-plane-test";
     fs::remove_all(dir);
     fs::create_directories(dir);
 
@@ -102,18 +130,48 @@ int main(int argc, char** argv) {
     const fs::path workDir = dir / "work";
     const fs::path output = dir / "out.txt";
 
-    std::vector<std::string> args = {
+    // Start the coordinator, capturing stdout so we can read its bound port.
+    int pipeFds[2];
+    if (::pipe(pipeFds) != 0) {
+        std::cerr << "FAIL: pipe failed\n";
+        return 1;
+    }
+    std::vector<std::string> coordinatorArgs = {
         "--job", "word_count",
         "--reducers", std::to_string(reducers),
+        "--workers", "2",
+        "--listen", "127.0.0.1:0",
         "--work-dir", workDir.string(),
         "--output", output.string(),
     };
     for (const auto& input : inputs) {
-        args.push_back(input.string());
+        coordinatorArgs.push_back(input.string());
     }
 
-    const int exitCode = run(coordinator, args);
-    check(exitCode == 0, "coordinator should exit 0, got " + std::to_string(exitCode));
+    const pid_t coordinatorPid = startProcess(coordinator, coordinatorArgs, pipeFds[1]);
+    ::close(pipeFds[1]);
+    check(coordinatorPid > 0, "coordinator should start");
+
+    const std::string listenLine = readLine(pipeFds[0]);
+    ::close(pipeFds[0]);
+    const std::string prefix = "LISTENING ";
+    check(listenLine.rfind(prefix, 0) == 0,
+          "coordinator should announce its address, got: '" + listenLine + "'");
+    const std::string address =
+        listenLine.size() > prefix.size() ? listenLine.substr(prefix.size()) : "";
+    check(!address.empty(), "coordinator should report a non-empty address");
+
+    // Launch the persistent workers the coordinator is waiting for.
+    std::vector<pid_t> workerPids;
+    for (int i = 0; i < 2; ++i) {
+        workerPids.push_back(startProcess(worker, {"--coordinator", address}));
+    }
+
+    const int coordinatorExit = waitProcess(coordinatorPid);
+    check(coordinatorExit == 0, "coordinator should exit 0, got " + std::to_string(coordinatorExit));
+    for (const pid_t pid : workerPids) {
+        check(waitProcess(pid) == 0, "worker should exit 0");
+    }
 
     const auto counts = readOutput(output);
     check(counts.size() == 5, "expected 5 distinct words");

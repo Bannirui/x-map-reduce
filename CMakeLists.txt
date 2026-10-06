@@ -20,6 +20,7 @@ include(CTest)
 
 add_subdirectory(src)
 add_subdirectory(net)
+add_subdirectory(runtime)
 add_subdirectory(examples)
 add_subdirectory(apps)
 

@@ -68,6 +68,7 @@ public:
     Listener& operator=(const Listener&)=delete;
 
     [[nodiscard]] std::uint16_t port() const noexcept{ return port_; }
+    [[nodiscard]] int fd() const noexcept{ return fd_; }
 
     // Block until a client connects and return the connected socket.
     Connection accept() const;
