@@ -1,5 +1,5 @@
 #include"jobs.h"
-#include"mapreduce.h"
+#include"mapreduce/mapreduce.h"
 #include"paths.h"
 
 #include<algorithm>
