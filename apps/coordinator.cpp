@@ -1,13 +1,11 @@
 #include"net/net.h"
 #include"runtime/jobs.h"
-#include"runtime/paths.h"
 #include"runtime/scheduler.h"
 #include"runtime/task.h"
 
 #include<algorithm>
 #include<cerrno>
 #include<cstdint>
-#include<filesystem>
 #include<iostream>
 #include<iterator>
 #include<poll.h>
@@ -16,18 +14,15 @@
 #include<utility>
 #include<vector>
 
-#include<unistd.h>
-
 #include<sys/socket.h>
-
-namespace fs=std::filesystem;
+#include<unistd.h>
 
 namespace {
 
 void usage(const char* program){
     std::cerr<<"Usage: "<<program
              <<" --job <name> [--reducers <R>] [--workers <N>] [--listen <host:port>]"
-             <<" [--work-dir <dir>] --output <file> <input...>\n";
+             <<" --output <file> <input...>\n";
 }
 
 std::pair<std::string,std::uint16_t> parseEndpoint(const std::string& endpoint){
@@ -37,21 +32,6 @@ std::pair<std::string,std::uint16_t> parseEndpoint(const std::string& endpoint){
     }
     return {endpoint.substr(0,colon),
             static_cast<std::uint16_t>(std::stoul(endpoint.substr(colon+1)))};
-}
-
-std::vector<std::string> splitTab(const std::string& text){
-    std::vector<std::string> fields;
-    std::size_t start=0;
-    while(true){
-        const std::size_t tab=text.find('\t',start);
-        if(tab==std::string::npos){
-            fields.push_back(text.substr(start));
-            break;
-        }
-        fields.push_back(text.substr(start,tab-start));
-        start=tab+1;
-    }
-    return fields;
 }
 
 mrapp::TaskKind kindOf(const std::string& token){
@@ -72,6 +52,26 @@ std::string toString(const std::vector<std::uint8_t>& bytes){
     return std::string(bytes.begin(),bytes.end());
 }
 
+// Split off the first `fields` tab-separated fields; `rest` (which may itself
+// contain tabs and newlines) is whatever follows. This is how the messages that
+// carry a key/value blob are parsed without corrupting the blob.
+std::vector<std::string> splitHead(const std::string& text,std::size_t fields,std::string& rest){
+    std::vector<std::string> head;
+    std::size_t start=0;
+    for(std::size_t i=0;i<fields;++i){
+        const std::size_t tab=text.find('\t',start);
+        if(tab==std::string::npos){
+            head.push_back(text.substr(start));
+            rest.clear();
+            return head;
+        }
+        head.push_back(text.substr(start,tab-start));
+        start=tab+1;
+    }
+    rest=text.substr(start);
+    return head;
+}
+
 struct Worker {
     xmr::net::Connection connection;
     bool idle=false;  // sent REQUEST, waiting for a task
@@ -80,21 +80,19 @@ struct Worker {
 }  // namespace
 
 /**
- * V4.1 coordinator: a single-threaded control plane. It listens for persistent
- * workers, hands them map tasks then reduce tasks through an in-process
- * Scheduler, and merges the reduce part files into the final output. The
- * intermediate data still travels through the shared work dir; moving it to
- * TCP is V4.2.
+ * V4.2 coordinator: a single-threaded control *and* data plane. It hands map
+ * then reduce tasks to persistent workers, relays map output to the reducers
+ * that fetch it, and merges the reduce results in memory into the final output.
+ * No shared work dir / intermediate files are used.
  *
- *   worker ──connect──> coordinator
- *   worker ──REQUEST──> coordinator ──TASK──> worker ──DONE──> coordinator
- *          (map barrier) then (reduce barrier), then STOP + merge
+ *   map worker   --MAPOUT(task,part,blob)--> coordinator
+ *   reduce worker --FETCH(task,part)-------> coordinator --DATA(blob)-->
+ *   reduce worker --RESULT(part,blob)------> coordinator  (merged -> --output)
  */
 int main(int argc,char** argv){
     std::string jobName;
     std::string outputFile;
     std::string listen="127.0.0.1:0";
-    fs::path workDir;
     std::size_t reducers=3;
     std::size_t expectedWorkers=1;
     std::vector<std::string> inputs;
@@ -109,8 +107,6 @@ int main(int argc,char** argv){
             expectedWorkers=std::stoul(argv[++i]);
         }else if(arg=="--listen"&&i+1<argc){
             listen=argv[++i];
-        }else if(arg=="--work-dir"&&i+1<argc){
-            workDir=argv[++i];
         }else if(arg=="--output"&&i+1<argc){
             outputFile=argv[++i];
         }else{
@@ -129,43 +125,72 @@ int main(int argc,char** argv){
         return 2;
     }
 
-    bool ownsWorkDir=false;
-    if(workDir.empty()){
-        workDir=fs::temp_directory_path()/("x-map-reduce-"+std::to_string(::getpid()));
-        ownsWorkDir=true;
-    }
-
     try{
-        fs::create_directories(workDir);
-
         const auto [host,port]=parseEndpoint(listen);
         xmr::net::Listener listener(host,port);
         // Report the real port (--listen port 0 picks an ephemeral one) so the
         // caller knows where to point the workers.
         std::cout<<"LISTENING "<<host<<":"<<listener.port()<<std::endl;
 
-        mrapp::Scheduler scheduler(jobName,inputs,reducers,workDir.string(),outputFile);
+        mrapp::Scheduler scheduler(jobName,inputs,reducers);
         std::vector<Worker> workers;
 
+        // Shuffle state (data plane): mapOutput[mapTask][partition] and the
+        // accumulated reduce results.
+        std::vector<std::vector<std::string>> mapOutput(
+            inputs.size(),std::vector<std::string>(reducers));
+        std::vector<KeyValue> merged;
+
         auto handleMessage=[&](Worker& worker){
-            const std::vector<std::string> fields=
-                splitTab(toString(worker.connection.receive()));
-            if(fields.empty()){
+            const std::string message=toString(worker.connection.receive());
+            std::string rest;
+            const std::vector<std::string> head=splitHead(message,1,rest);
+            if(head.empty()){
                 throw std::runtime_error("empty control message");
             }
-            if(fields[0]=="HELLO"){
+            const std::string& command=head[0];
+
+            if(command=="HELLO"){
                 // Registration only; the worker asks for work next.
-            }else if(fields[0]=="REQUEST"){
+            }else if(command=="REQUEST"){
                 worker.idle=true;
-            }else if(fields[0]=="DONE"&&fields.size()>=3){
-                scheduler.markDone(kindOf(fields[1]));
+            }else if(command=="DONE"){
+                std::string tail;
+                const auto fields=splitHead(rest,2,tail);
+                scheduler.markDone(kindOf(fields[0]));
                 worker.idle=false;
-            }else if(fields[0]=="FAIL"&&fields.size()>=3){
-                const std::string reason=fields.size()>=4?fields[3]:"unknown";
-                scheduler.markFailed(kindOf(fields[1]),std::stoul(fields[2]),reason);
+            }else if(command=="FAIL"){
+                std::string tail;
+                const auto fields=splitHead(rest,3,tail);
+                scheduler.markFailed(kindOf(fields[0]),std::stoul(fields[1]),fields[2]);
                 worker.idle=false;
+            }else if(command=="MAPOUT"){
+                std::string blob;
+                const auto fields=splitHead(rest,2,blob);
+                const std::size_t task=std::stoul(fields[0]);
+                const std::size_t partition=std::stoul(fields[1]);
+                if(task>=mapOutput.size()||partition>=reducers){
+                    throw std::runtime_error("MAPOUT out of range");
+                }
+                mapOutput[task][partition]=std::move(blob);
+            }else if(command=="FETCH"){
+                std::string tail;
+                const auto fields=splitHead(rest,2,tail);
+                const std::size_t task=std::stoul(fields[0]);
+                const std::size_t partition=std::stoul(fields[1]);
+                if(task>=mapOutput.size()||partition>=reducers){
+                    throw std::runtime_error("FETCH out of range");
+                }
+                worker.connection.send(toBytes("DATA\t"+mapOutput[task][partition]));
+            }else if(command=="RESULT"){
+                std::string blob;
+                const auto fields=splitHead(rest,1,blob);
+                auto pairs=mrapp::deserializeKeyValues(blob);
+                merged.insert(merged.end(),
+                    std::make_move_iterator(pairs.begin()),
+                    std::make_move_iterator(pairs.end()));
             }else{
-                throw std::runtime_error("unexpected control message '"+fields[0]+"'");
+                throw std::runtime_error("unexpected control message '"+command+"'");
             }
         };
 
@@ -235,14 +260,6 @@ int main(int argc,char** argv){
             return 1;
         }
 
-        // Merge the (already individually sorted) part files into one output.
-        std::vector<KeyValue> merged;
-        for(std::size_t r=0;r<reducers;++r){
-            auto pairs=ReadKeyValues(mrapp::reducePartPath(workDir,r).string());
-            merged.insert(merged.end(),
-                std::make_move_iterator(pairs.begin()),
-                std::make_move_iterator(pairs.end()));
-        }
         std::stable_sort(merged.begin(),merged.end(),
             [](const KeyValue& a,const KeyValue& b){
                 return a.first<b.first;
@@ -253,9 +270,5 @@ int main(int argc,char** argv){
         return 1;
     }
 
-    if(ownsWorkDir){
-        std::error_code error;
-        fs::remove_all(workDir,error);
-    }
     return 0;
 }

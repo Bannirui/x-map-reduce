@@ -37,10 +37,13 @@ void usage(const char* program){
 }  // namespace
 
 /**
- * V4.1 persistent worker: connect to the coordinator, then repeatedly request a
- * task, run it, and report the result until the coordinator says STOP. Workers
- * are launched by the user and outlive a single task; the coordinator pushes
- * work to whichever worker has requested it (so workers never busy-wait).
+ * V4.2 persistent worker: connect to the coordinator, then repeatedly request a
+ * task, run it, and report the result until told STOP. Map output and reduce
+ * input/results travel over this same TCP connection (the data plane); no
+ * shared filesystem is involved.
+ *
+ *   map    : TASK -> run -> MAPOUT (per partition) -> DONE
+ *   reduce : TASK -> FETCH each map partition -> DATA -> RESULT -> DONE
  */
 int main(int argc,char** argv){
     std::string coordinator;
@@ -70,17 +73,34 @@ int main(int argc,char** argv){
                 break;
             }
             if(message.rfind("TASK\t",0)!=0){
-                throw std::runtime_error("unexpected coordinator message '"+message+"'");
+                throw std::runtime_error("unexpected coordinator message");
             }
 
             const mrapp::Task task=mrapp::Task::deserialize(message.substr(5));
             try{
-                mrapp::executeTask(task);
-                connection.send(toBytes(
-                    "DONE\t"+kindToken(task.kind)+"\t"+std::to_string(task.id)));
+                if(task.kind==mrapp::TaskKind::Map){
+                    const auto parts=mrapp::runMapTask(task);
+                    for(std::size_t r=0;r<parts.size();++r){
+                        connection.send(toBytes("MAPOUT\t"+std::to_string(task.id)+"\t"
+                            +std::to_string(r)+"\t"+mrapp::serializeKeyValues(parts[r])));
+                    }
+                }else{
+                    auto fetch=[&](std::size_t mapTask,std::size_t partition){
+                        connection.send(toBytes("FETCH\t"+std::to_string(mapTask)
+                            +"\t"+std::to_string(partition)));
+                        const std::string data=toString(connection.receive());
+                        if(data.rfind("DATA\t",0)!=0){
+                            throw std::runtime_error("expected DATA reply from coordinator");
+                        }
+                        return mrapp::deserializeKeyValues(data.substr(5));
+                    };
+                    const auto result=mrapp::runReduceTask(task,fetch);
+                    connection.send(toBytes("RESULT\t"+std::to_string(task.id)
+                        +"\t"+mrapp::serializeKeyValues(result)));
+                }
+                connection.send(toBytes("DONE\t"+kindToken(task.kind)+"\t"+std::to_string(task.id)));
             }catch(const std::exception& error){
-                connection.send(toBytes(
-                    "FAIL\t"+kindToken(task.kind)+"\t"
+                connection.send(toBytes("FAIL\t"+kindToken(task.kind)+"\t"
                     +std::to_string(task.id)+"\t"+error.what()));
             }
         }

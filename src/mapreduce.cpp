@@ -59,8 +59,7 @@ void MapReduce::Run(const std::vector<std::string>& inputFiles,const std::string
 }
 
 void MapReduce::ShuffleAndReduce(std::vector<KeyValue> intermediate,const std::string& outFile){
-    auto grouped=this->shufflePhase(std::move(intermediate));
-    this->reducePhase(grouped,outFile);
+    WriteKeyValues(outFile,this->Reduce(std::move(intermediate)));
 }
 
 /**
@@ -132,17 +131,16 @@ std::map<Key,std::vector<Value>> MapReduce::shufflePhase(std::vector<KeyValue> i
     return grouped;
 }
 
-void MapReduce::reducePhase(const std::map<Key,std::vector<Value>>& grouped,const std::string& outputFile){
-    std::ofstream output(outputFile);
-    if(!output){
-        throw std::runtime_error("Failed to open output file: "+outputFile);
-    }
+std::vector<KeyValue> MapReduce::Reduce(std::vector<KeyValue> intermediate){
+    auto grouped=this->shufflePhase(std::move(intermediate));
+    std::vector<KeyValue> result;
     for(const auto& [key,values]:grouped){
-        auto results=this->reducer_(key,values);
-        for(const auto& [retKey,retValue]:results){
-            output<<retKey<<'\t'<<retValue<<'\n';
-        }
+        auto pairs=this->reducer_(key,values);
+        result.insert(result.end(),
+            std::make_move_iterator(pairs.begin()),
+            std::make_move_iterator(pairs.end()));
     }
+    return result;
 }
 
 std::size_t MapReduce::resolveWorkers(std::size_t tasks) const{

@@ -18,9 +18,11 @@ public:
     std::vector<KeyValue> Map(const std::vector<std::string>& inputFiles) const;
     // V3: Shuffle + Reduce over already-collected intermediate data.
     void ShuffleAndReduce(std::vector<KeyValue> intermediate,const std::string& outFile);
+    // V4.2: Shuffle + Reduce over already-collected pairs, returning the result
+    // instead of writing it (the data plane ships pairs over TCP, not files).
+    std::vector<KeyValue> Reduce(std::vector<KeyValue> intermediate);
 private:
     std::map<Key,std::vector<Value>> shufflePhase(std::vector<KeyValue> intermediate);
-    void reducePhase(const std::map<Key,std::vector<Value>>& grouped,const std::string& outputFile);
     std::size_t resolveWorkers(std::size_t tasks) const;
 private:
     MapFunction mapper_;

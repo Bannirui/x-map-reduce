@@ -6,7 +6,6 @@
 #include <fstream>
 #include <iostream>
 #include <map>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -87,21 +86,10 @@ std::map<std::string, std::string> readOutput(const fs::path& path) {
     return result;
 }
 
-std::set<std::string> keysIn(const fs::path& path) {
-    std::set<std::string> keys;
-    std::ifstream input(path);
-    std::string line;
-    while (std::getline(input, line)) {
-        const auto tab = line.find('\t');
-        if (tab != std::string::npos) {
-            keys.insert(line.substr(0, tab));
-        }
-    }
-    return keys;
-}
-
 }  // namespace
 
+// V4.2 integration: the coordinator and two persistent workers exchange all
+// intermediate data over TCP (no shared work dir); only --output is a file.
 int main(int argc, char** argv) {
     if (argc != 3) {
         std::cerr << "Usage: control_plane_test <path-to-coordinator> <path-to-worker>\n";
@@ -121,13 +109,7 @@ int main(int argc, char** argv) {
         std::ofstream(inputs[1]) << "hello distributed\n";
         std::ofstream(inputs[2]) << "mapreduce scales\n";
     }
-    const std::vector<std::set<std::string>> expectedInputKeys = {
-        {"hello", "world", "mapreduce"},
-        {"hello", "distributed"},
-        {"mapreduce", "scales"},
-    };
 
-    const fs::path workDir = dir / "work";
     const fs::path output = dir / "out.txt";
 
     // Start the coordinator, capturing stdout so we can read its bound port.
@@ -141,7 +123,6 @@ int main(int argc, char** argv) {
         "--reducers", std::to_string(reducers),
         "--workers", "2",
         "--listen", "127.0.0.1:0",
-        "--work-dir", workDir.string(),
         "--output", output.string(),
     };
     for (const auto& input : inputs) {
@@ -180,39 +161,6 @@ int main(int argc, char** argv) {
     check(counts.count("mapreduce") == 1 && counts.at("mapreduce") == "2", "mapreduce should be counted twice");
     check(counts.count("distributed") == 1 && counts.at("distributed") == "1", "distributed should be counted once");
     check(counts.count("scales") == 1 && counts.at("scales") == "1", "scales should be counted once");
-
-    // Map side: map-i-part-r must contain only keys where partitionOf(key, R) == r.
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-        std::map<std::string, std::size_t> foundIn;
-        for (std::size_t r = 0; r < reducers; ++r) {
-            const fs::path path = workDir / ("map-" + std::to_string(i) + "-part-" + std::to_string(r) + ".txt");
-            check(fs::exists(path), "map partition should exist: " + path.filename().string());
-            for (const auto& key : keysIn(path)) {
-                ++foundIn[key];
-                check(partitionOf(key, reducers) == r,
-                      key + " is in the wrong map partition");
-            }
-        }
-        check(foundIn.size() == expectedInputKeys[i].size(),
-              "map task " + std::to_string(i) + " should cover its input keys");
-        for (const auto& [key, count] : foundIn) {
-            check(count == 1, "key must appear in exactly one map partition: " + key);
-        }
-    }
-
-    // Reduce side: part-r outputs are disjoint per partition and cover all keys.
-    std::map<std::string, std::size_t> reduceFoundIn;
-    for (std::size_t r = 0; r < reducers; ++r) {
-        const fs::path path = workDir / ("part-" + std::to_string(r) + ".txt");
-        check(fs::exists(path), "reduce part should exist: " + path.filename().string());
-        for (const auto& key : keysIn(path)) {
-            ++reduceFoundIn[key];
-        }
-    }
-    check(reduceFoundIn.size() == 5, "reduce parts should cover all 5 keys");
-    for (const auto& [key, count] : reduceFoundIn) {
-        check(count == 1, "key must appear in exactly one reduce part: " + key);
-    }
 
     fs::remove_all(dir);
 

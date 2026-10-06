@@ -18,9 +18,7 @@ class Scheduler {
 public:
     Scheduler(std::string job,
               std::vector<std::string> inputs,
-              std::size_t reducers,
-              std::string workDir,
-              std::string output);
+              std::size_t reducers);
 
     // Next task to dispatch, or nullopt when nothing is currently available:
     // either everything has been handed out (waiting on in-flight tasks) or the
@@ -41,8 +39,6 @@ private:
     std::string job_;
     std::vector<std::string> inputs_;
     std::size_t reducers_;
-    std::string workDir_;
-    std::string output_;
 
     Phase phase_=Phase::Map;
     std::size_t nextMap_=0;

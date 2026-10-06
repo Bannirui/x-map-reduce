@@ -1,7 +1,5 @@
 #include"runtime/scheduler.h"
 
-#include"runtime/paths.h"
-
 #include<stdexcept>
 #include<utility>
 
@@ -9,14 +7,10 @@ namespace mrapp {
 
 Scheduler::Scheduler(std::string job,
                      std::vector<std::string> inputs,
-                     std::size_t reducers,
-                     std::string workDir,
-                     std::string output)
+                     std::size_t reducers)
     :job_(std::move(job)),
      inputs_(std::move(inputs)),
-     reducers_(reducers),
-     workDir_(std::move(workDir)),
-     output_(std::move(output)){
+     reducers_(reducers){
     if(reducers_==0){
         throw std::runtime_error("reducers must be > 0");
     }
@@ -32,7 +26,7 @@ std::optional<Task> Scheduler::takeTask(){
         task.id=nextMap_;
         task.job=job_;
         task.reducers=reducers_;
-        task.workDir=workDir_;
+        task.maps=inputs_.size();
         task.input=inputs_[nextMap_];
         ++nextMap_;
         return task;
@@ -43,11 +37,7 @@ std::optional<Task> Scheduler::takeTask(){
         task.id=nextReduce_;
         task.job=job_;
         task.reducers=reducers_;
-        task.workDir=workDir_;
-        task.output=reducePartPath(workDir_,nextReduce_).string();
-        for(std::size_t i=0;i<inputs_.size();++i){
-            task.intermediates.push_back(mapPartPath(workDir_,i,nextReduce_).string());
-        }
+        task.maps=inputs_.size();
         ++nextReduce_;
         return task;
     }
