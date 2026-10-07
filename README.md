@@ -9,31 +9,18 @@ refer to https://static.googleusercontent.com/media/research.google.com/en//arch
 
 ```sh
 chmod +x ./build.sh
-./build.sh
-
-
-# run the test suite
-cd <repo>
-ctest --test-dir build --output-on-failure
+./build.sh && ctest --test-dir build --output-on-failure
 ```
 
-and i've provided few samples for u
+Run from `build/bin`: the binaries, the plugins and the copied `asset/` inputs all resolve from there.
 
-### 1.1 only one binary
+### 1.1.1 start master
 
 ```sh
 cd ./build/bin
 
-./word_count
-./sum
-```
-
-### 1.2 master and worker
-
-#### 1.2.1 start master
-
-```sh
-./coordinator --job word_count \
+./x-coordinator --job word_count \
+  --plugin ../lib/word_count.so \
   --workers 3 \
   --reducers 3 \
   --listen 127.0.0.1:9527 \
@@ -42,13 +29,19 @@ cd ./build/bin
 ```
 
 > only the coordinator needs the input files; workers fetch their splits over TCP.
+> `--plugin` points at the job's shared object; jobs are no longer compiled in.
+> `--workers 3` withholds all work until exactly 3 workers connect, so start 3.
 
-#### 1.2.2 start workers
+### 1.1.2 start workers
 
-start workers
+In another shell (also from `build/bin`):
 
 ```sh
-./worker --coordinator 127.0.0.1:9527
+cd ./build/bin
+for i in 1 2 3; do
+  ./x-worker --coordinator 127.0.0.1:9527 --plugin ../lib/word_count.so &
+done
+wait
 ```
 
 ## 2 FEATURE
@@ -72,11 +65,12 @@ start workers
     - duplicate slow tasks
     - first attempt wins
   - [ ] V5.2 heartbeat liveness
-- [ ] V6 Job submission — submit arbitrary map/reduce to the master
-  - [ ] V6.0 native plugin ABI
+    - extract worker management into its own class (`WorkerRegistry`: registration, idle/liveness), mirroring how `Scheduler` isolates task scheduling; the coordinator keeps only I/O
+- [ ] V6 Job submission—submit arbitrary map/reduce to the master
+  - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface
     - worker loads `job.so` with `dlopen`
-  - [ ] V6.1 submission + code distribution
+  - [ ] V6.1 submission+code distribution
     - `SUBMIT`/`PLUGIN` messages
     - plugin shipped once per worker, cached by content hash
   - [ ] V6.2 *(optional)* scripting jobs (Lua/Python) instead of native plugins

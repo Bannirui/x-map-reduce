@@ -12,54 +12,52 @@
 
 
 namespace {
-
-/**
- * Runs fn(id) on `workers` threads (id in [0, workers)).
- * Workers == 1 runs inline.
- * Exceptions are captured per worker and rethrown on the calling thread after every worker has been joined.
- */
-template<class Fn>
-void runTasks(std::size_t workers,Fn fn){
-    if(workers<=1){
-        fn(0);
-        return;
-    }
-    std::vector<std::thread> threads;
-    std::vector<std::exception_ptr> errors(workers);
-    threads.reserve(workers);
-    for(std::size_t id=0;id<workers;++id){
-        threads.emplace_back([&,id]{
-            try{
-                fn(id);
-            }catch(...){
-                errors[id]=std::current_exception();
+    /**
+     * Runs fn(id) on `workers` threads (id in [0, workers)).
+     * Workers == 1 runs inline.
+     * Exceptions are captured per worker and rethrown on the calling thread after every worker has been joined.
+     */
+    template <class Fn>
+    void runTasks(std::size_t workers, Fn fn) {
+        if (workers <= 1) {
+            fn(0);
+            return;
+        }
+        std::vector<std::thread> threads;
+        std::vector<std::exception_ptr> errors(workers);
+        threads.reserve(workers);
+        for (std::size_t id = 0; id < workers; ++id) {
+            threads.emplace_back([&,id] {
+                try {
+                    fn(id);
+                } catch (...) {
+                    errors[id] = std::current_exception();
+                }
+            });
+        }
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        for (const auto& error : errors) {
+            if (error) {
+                std::rethrow_exception(error);
             }
-        });
-    }
-    for(auto& thread:threads){
-        thread.join();
-    }
-    for(const auto& error:errors){
-        if(error){
-            std::rethrow_exception(error);
         }
     }
+} // namespace
+
+
+MapReduce::MapReduce(MapFunction mapper, ReduceFunction reducer, std::size_t workers)
+    : mapper_(std::move(mapper)), reducer_(std::move(reducer)), workers_(workers) {
 }
 
-}  // namespace
-
-
-MapReduce::MapReduce(MapFunction mapper,ReduceFunction reducer,std::size_t workers)
-    :mapper_(std::move(mapper)),reducer_(std::move(reducer)),workers_(workers)
-{}
-
-void MapReduce::Run(const std::vector<std::string>& inputFiles,const std::string& outFile){
-    auto intermediate=this->Map(inputFiles);
-    this->ShuffleAndReduce(std::move(intermediate),outFile);
+void MapReduce::Run(const std::vector<std::string>& inputFiles, const std::string& outFile) {
+    auto intermediate = this->Map(inputFiles);
+    this->ShuffleAndReduce(std::move(intermediate), outFile);
 }
 
-void MapReduce::ShuffleAndReduce(std::vector<KeyValue> intermediate,const std::string& outFile){
-    WriteKeyValues(outFile,this->Reduce(std::move(intermediate)));
+void MapReduce::ShuffleAndReduce(std::vector<KeyValue> intermediate, const std::string& outFile) {
+    WriteKeyValues(outFile, this->Reduce(std::move(intermediate)));
 }
 
 /**
@@ -74,62 +72,62 @@ void MapReduce::ShuffleAndReduce(std::vector<KeyValue> intermediate,const std::s
  *             │
  *   per-file intermediate data (in memory)
  */
-std::vector<KeyValue> MapReduce::Map(const std::vector<std::string>& inputFiles) const{
-    const std::size_t workers=this->resolveWorkers(inputFiles.size());
-    std::vector<std::vector<KeyValue>> perFile(inputFiles.size());
+std::vector<KeyValue> MapReduce::Map(const std::vector<std::string>& inputFiles) const {
+    const std::size_t workers = this->resolveWorkers(inputFiles.size());
+    std::vector<std::vector<KeyValue> > perFile(inputFiles.size());
 
-    runTasks(workers,[&](std::size_t id){
-        for(std::size_t taskId=id,taskSz=inputFiles.size();taskId<taskSz;taskId+=workers){
-            const auto& filename=inputFiles[taskId];
+    runTasks(workers, [&](std::size_t id) {
+        for (std::size_t taskId = id, taskSz = inputFiles.size(); taskId < taskSz; taskId += workers) {
+            const auto& filename = inputFiles[taskId];
             std::ifstream input(filename);
-            if(!input){
-                throw std::runtime_error("Failed to open input file: "+filename);
+            if (!input) {
+                throw std::runtime_error("Failed to open input file: " + filename);
             }
-            auto& intermediate=perFile[taskId];
+            auto& intermediate = perFile[taskId];
             std::string line;
-            while(std::getline(input,line)){
-                auto pairs=this->mapper_(filename,line);
+            while (std::getline(input, line)) {
+                auto pairs = this->mapper_(filename, line);
                 intermediate.insert(intermediate.end(),
-                    std::make_move_iterator(pairs.begin()),
-                    std::make_move_iterator(pairs.end()));
+                                    std::make_move_iterator(pairs.begin()),
+                                    std::make_move_iterator(pairs.end()));
             }
         }
     });
 
     std::vector<KeyValue> intermediate;
-    for(auto& file:perFile){
+    for (auto& file : perFile) {
         intermediate.insert(intermediate.end(),
-            std::make_move_iterator(file.begin()),
-            std::make_move_iterator(file.end()));
+                            std::make_move_iterator(file.begin()),
+                            std::make_move_iterator(file.end()));
     }
     return intermediate;
 }
 
-std::vector<KeyValue> MapReduce::MapData(const std::string& inputName,const std::string& content) const{
-    // Same per-line contract as the file path, but the bytes are already in
-    // memory (V4.3: a map worker receives its input split over TCP).
+std::vector<KeyValue> MapReduce::MapData(const std::string& inputName, const std::string& content) const {
+    // map函数执行的中间结果放在worker的内存上
     std::vector<KeyValue> intermediate;
-    std::size_t start=0;
-    while(start<content.size()){
-        const std::size_t newline=content.find('\n',start);
-        const std::size_t end=(newline==std::string::npos)?content.size():newline;
-        std::string line=content.substr(start,end-start);
-        if(!line.empty()&&line.back()=='\r'){
+    std::size_t start = 0;
+    while (start < content.size()) {
+        const std::size_t newline = content.find('\n', start);
+        const std::size_t end = (newline == std::string::npos) ? content.size() : newline;
+        std::string line = content.substr(start, end - start);
+        if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
-        auto pairs=this->mapper_(inputName,line);
+        // map函数执行的粒度的行
+        auto pairs = this->mapper_(inputName, line);
         intermediate.insert(intermediate.end(),
-            std::make_move_iterator(pairs.begin()),
-            std::make_move_iterator(pairs.end()));
-        if(newline==std::string::npos){
+                            std::make_move_iterator(pairs.begin()),
+                            std::make_move_iterator(pairs.end()));
+        if (newline == std::string::npos) {
             break;
         }
-        start=newline+1;
+        start = newline + 1;
     }
     return intermediate;
 }
 
-std::map<Key,std::vector<Value>> MapReduce::shufflePhase(std::vector<KeyValue> intermediate){
+std::map<Key, std::vector<Value> > MapReduce::shufflePhase(std::vector<KeyValue> intermediate) {
     /**
      * after sorting:
      *   hello 1
@@ -137,86 +135,85 @@ std::map<Key,std::vector<Value>> MapReduce::shufflePhase(std::vector<KeyValue> i
      *   world 1
      *   mapreduce 1
      */
-    std::sort(intermediate.begin(),intermediate.end(),
-        [](const KeyValue& a,const KeyValue& b){
-            return a.first<b.first;
-        }
-    );
+    std::sort(intermediate.begin(), intermediate.end(),
+              [](const KeyValue& a, const KeyValue& b) {
+                  return a.first < b.first;
+              }
+        );
     /**
      * after group:
      *   hello [1, 1]
      *   world [1]
      *   mapreduce [1]
      */
-    std::map<Key,std::vector<Value>> grouped;
-    for(const auto& [k,v]:intermediate){
+    std::map<Key, std::vector<Value> > grouped;
+    for (const auto& [k,v] : intermediate) {
         grouped[k].push_back(v);
     }
     return grouped;
 }
 
-std::vector<KeyValue> MapReduce::Reduce(std::vector<KeyValue> intermediate){
-    auto grouped=this->shufflePhase(std::move(intermediate));
+std::vector<KeyValue> MapReduce::Reduce(std::vector<KeyValue> intermediate) {
+    auto grouped = this->shufflePhase(std::move(intermediate));
     std::vector<KeyValue> result;
-    for(const auto& [key,values]:grouped){
-        auto pairs=this->reducer_(key,values);
+    for (const auto& [key,values] : grouped) {
+        auto pairs = this->reducer_(key, values);
         result.insert(result.end(),
-            std::make_move_iterator(pairs.begin()),
-            std::make_move_iterator(pairs.end()));
+                      std::make_move_iterator(pairs.begin()),
+                      std::make_move_iterator(pairs.end()));
     }
     return result;
 }
 
-std::size_t MapReduce::resolveWorkers(std::size_t tasks) const{
-    if(tasks==0){
+std::size_t MapReduce::resolveWorkers(std::size_t tasks) const {
+    if (tasks == 0) {
         return 1;
     }
-    std::size_t workers=this->workers_!=0?this->workers_:std::thread::hardware_concurrency();
-    if(workers==0){
-        workers=1;
+    std::size_t workers = this->workers_ != 0 ? this->workers_ : std::thread::hardware_concurrency();
+    if (workers == 0) {
+        workers = 1;
     }
-    return std::min(workers,tasks);
+    return std::min(workers, tasks);
 }
 
-void WriteKeyValues(const std::string& path,const std::vector<KeyValue>& pairs){
+void WriteKeyValues(const std::string& path, const std::vector<KeyValue>& pairs) {
     std::ofstream output(path);
-    if(!output){
-        throw std::runtime_error("Failed to open intermediate file: "+path);
+    if (!output) {
+        throw std::runtime_error("Failed to open intermediate file: " + path);
     }
-    for(const auto& [key,value]:pairs){
-        output<<key<<'\t'<<value<<'\n';
+    for (const auto& [key,value] : pairs) {
+        output << key << '\t' << value << '\n';
     }
-    if(!output){
-        throw std::runtime_error("Failed to write intermediate file: "+path);
+    if (!output) {
+        throw std::runtime_error("Failed to write intermediate file: " + path);
     }
 }
 
-std::vector<KeyValue> ReadKeyValues(const std::string& path){
+std::vector<KeyValue> ReadKeyValues(const std::string& path) {
     std::ifstream input(path);
-    if(!input){
-        throw std::runtime_error("Failed to open intermediate file: "+path);
+    if (!input) {
+        throw std::runtime_error("Failed to open intermediate file: " + path);
     }
     std::vector<KeyValue> pairs;
     std::string line;
-    while(std::getline(input,line)){
-        const auto tab=line.find('\t');
-        if(tab==std::string::npos){
+    while (std::getline(input, line)) {
+        const auto tab = line.find('\t');
+        if (tab == std::string::npos) {
             continue;
         }
-        pairs.emplace_back(line.substr(0,tab),line.substr(tab+1));
+        pairs.emplace_back(line.substr(0, tab), line.substr(tab + 1));
     }
     return pairs;
 }
 
-std::size_t partitionOf(const Key& key,std::size_t reducers){
-    if(reducers<=1){
+std::size_t partitionOf(const Key& key, std::size_t reducers) {
+    if (reducers <= 1) {
         return 0;
     }
-    // FNV-1a (32-bit)
-    std::uint32_t hash=2166136261u;
-    for(const unsigned char byte:key){
-        hash^=byte;
-        hash*=16777619u;
+    std::uint32_t hash = 2166136261u;
+    for (const unsigned char byte : key) {
+        hash ^= byte;
+        hash *= 16777619u;
     }
-    return static_cast<std::size_t>(hash%reducers);
+    return static_cast<std::size_t>(hash % reducers);
 }

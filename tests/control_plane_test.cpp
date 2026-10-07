@@ -91,12 +91,13 @@ std::map<std::string, std::string> readOutput(const fs::path& path) {
 // V4.2 integration: the coordinator and two persistent workers exchange all
 // intermediate data over TCP (no shared work dir); only --output is a file.
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::cerr << "Usage: control_plane_test <path-to-coordinator> <path-to-worker>\n";
+    if (argc != 4) {
+        std::cerr << "Usage: control_plane_test <path-to-coordinator> <path-to-worker> <path-to-job-plugin>\n";
         return 2;
     }
     const std::string coordinator = argv[1];
     const std::string worker = argv[2];
+    const std::string plugin = argv[3];
 
     const fs::path dir = fs::temp_directory_path() / "x-map-reduce-control-plane-test";
     fs::remove_all(dir);
@@ -120,6 +121,7 @@ int main(int argc, char** argv) {
     }
     std::vector<std::string> coordinatorArgs = {
         "--job", "word_count",
+        "--plugin", plugin,
         "--reducers", std::to_string(reducers),
         "--workers", "2",
         "--listen", "127.0.0.1:0",
@@ -145,7 +147,7 @@ int main(int argc, char** argv) {
     // Launch the persistent workers the coordinator is waiting for.
     std::vector<pid_t> workerPids;
     for (int i = 0; i < 2; ++i) {
-        workerPids.push_back(startProcess(worker, {"--coordinator", address}));
+        workerPids.push_back(startProcess(worker, {"--coordinator", address, "--plugin", plugin}));
     }
 
     const int coordinatorExit = waitProcess(coordinatorPid);

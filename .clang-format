@@ -1,0 +1,95 @@
+# .clang-format
+
+BasedOnStyle: Google
+# Google默认为2 这里改为4更通用
+IndentWidth: 4
+TabWidth: 4
+# 使用空格代替Tab 跨平台不容易出问题
+UseTab: Never
+# 每行字符数限制
+ColumnLimit: 120
+
+# 控制语句风格
+AllowShortIfStatementsOnASingleLine: true
+# 函数
+AllowShortFunctionsOnASingleLine: Empty
+# lambda None=避免被压缩 避免宏被压缩 Inline=可能会被压缩
+AllowShortLambdasOnASingleLine: None
+
+# 大括号换行风格 Attach=K&R大括号不换行风格 Allman=大括号换行风格
+BreakBeforeBraces: Attach
+# 指针和引用符号
+# left=int* ptr
+# right=int *ptr
+PointerAlignment: Left
+SpacesInAngles: false
+SpaceBeforeParens: ControlStatements
+# 命名空间内缩进
+NamespaceIndentation: All
+# 自动排序include语句 有些依赖必须严格顺序否则会出错
+# glad在glfw前面
+# imgui在ImGuizmo前面
+SortIncludes: CaseInsensitive
+# regroup 并合并相同模块的include
+IncludeBlocks: Regroup
+IncludeCategories:
+  # project headers
+  - Regex: '^"'
+    Priority: 1
+  # glad must always be first among graphics libs
+  - Regex: '^<glad/'
+    Priority: 2
+  # glfw must come after glad
+  - Regex: '^<GLFW/'
+    Priority: 3
+  # ImGuizmo must be after imgui, imgui+imguizmo together
+  - Regex: '^<imgui/'
+    Priority: 4
+  - Regex: '^<ImGuizmo/'
+    Priority: 5
+  # major third-party libraries
+  - Regex: '^<(entt|glm|vulkan|spdlog|stb|fmt)/'
+    Priority: 6
+  # other third-party
+  - Regex: '^<[^/]+/'
+    Priority: 7
+  # system headers
+  - Regex: '^<.*>'
+    Priority: 8
+
+# 自动换行注释
+ReflowComments: true
+# 自动注释未封闭的命名空间
+CommentPragmas: '^ IWYU pragma:'
+
+# 对齐 适度就行 避免过度表格化
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+# 尾注释只保留1个空格 不强制对齐同一列
+AlignTrailingComments: false
+
+DerivePointerAlignment: false
+FixNamespaceComments: true
+# public/protected/private缩进
+AccessModifierOffset: -4
+
+# 宏定义体缩进
+# None 永远顶格
+# BeforeHash #include随代码块缩进
+# AfterHash #跟关键字会分开
+IndentPPDirectives: BeforeHash
+
+# 宏内部是否缩进
+IndentWrappedFunctionNames: false
+# 多行宏的反斜杠对齐
+AlignEscapedNewlines: Left
+# 允许宏内保持结构
+AllowShortBlocksOnASingleLine: Never
+# 保持宏展开结构
+KeepEmptyLinesAtTheStartOfBlocks: false
+
+# 函数/类/struct 定义之间自动空一行
+# Leave-保持原样
+# Always-自动加空行
+# Never-自动删除空行
+SeparateDefinitionBlocks: Always

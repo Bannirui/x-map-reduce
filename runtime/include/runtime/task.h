@@ -7,38 +7,50 @@
 #include<string>
 #include<vector>
 
-namespace mrapp {
+namespace xmr {
+    enum class TaskKind { Map, Reduce };
 
-enum class TaskKind { Map, Reduce };
+    // 任务的抽象 可能是map任务 也可能是reduce任务
+    struct Task {
+        // 任务类型 是map任务还是reduce任务
+        TaskKind kind = TaskKind::Map;
+        /**
+         * map任务 map id 用来索引输入数据的
+         * reduce任务 reduce id 用来索引map输出的分区
+         */
+        std::size_t id = 0;
+        // 任务名称 唯一索引
+        std::string job;
+        // R map输出分区的依据
+        std::size_t reducers = 1;
+        // M 输入文件数决定多少个map任务 也就决定将来reduce要从多少个worker里面拉数据
+        std::size_t maps = 0;
+        // map任务才要关注 map任务的输入[key,value]的key
+        std::string input;
 
-// One unit of work handed to a worker. A Map task corresponds to one input
-// file; a Reduce task corresponds to one reduce partition, gathering that
-// partition's map output across every map task. In V4.2 the intermediate data
-// travels over TCP, so a task carries no file paths.
-struct Task {
-    TaskKind kind=TaskKind::Map;
-    std::size_t id=0;         // map: input index; reduce: partition index
-    std::string job;
-    std::size_t reducers=1;
-    std::size_t maps=0;       // number of map tasks (a reducer fetches one per map)
-    std::string input;        // Map only
+        // 序列化成文本协议 格式是 字段\t数据
+        std::string serialize() const;
 
-    // Tab-separated single-line encoding used on the control-plane wire.
-    std::string serialize() const;
-    static Task deserialize(const std::string& text);
-};
+        // 文本协议反序列化
+        static Task deserialize(const std::string& text);
+    };
 
-// Data-plane encoding: the same "key\tvalue\n" layout the old files used, just
-// carried inside a message instead of a file.
-std::string serializeKeyValues(const std::vector<KeyValue>& pairs);
-std::vector<KeyValue> deserializeKeyValues(const std::string& blob);
+    // Data-plane encoding: the same "key\tvalue\n" layout the old files used, just
+    // carried inside a message instead of a file.
+    std::string serializeKeyValues(const std::vector<KeyValue>& pairs);
 
-// Map task: map the received input content and return one bucket per reducer.
-std::vector<std::vector<KeyValue>> runMapTask(const Task& task,const std::string& content);
+    std::vector<KeyValue> deserializeKeyValues(const std::string& blob);
 
-// Reduce task: fetch each map task's partition through `fetch`, then
-// shuffle+reduce into the final key-ordered pairs.
-std::vector<KeyValue> runReduceTask(const Task& task,
-    const std::function<std::vector<KeyValue>(std::size_t mapTask,std::size_t partition)>& fetch);
+    /**
+     * @param task map任务
+     * @param content map任务的输入[key,value]的value
+     * @return map产出的中间结果 已经按照R分区好了 现在还放在worker的内存上 等着shuffle
+     */
+    std::vector<std::vector<KeyValue> > runMapTask(const Task& task, const std::string& content);
 
-}  // namespace mrapp
+    // Reduce task: fetch each map task's partition through `fetch`, then
+    // shuffle+reduce into the final key-ordered pairs.
+    std::vector<KeyValue> runReduceTask(const Task& task,
+                                        const std::function<std::vector<KeyValue>(
+                                            std::size_t mapTask, std::size_t partition)>& fetch);
+} // namespace xmr

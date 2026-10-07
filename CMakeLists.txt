@@ -16,12 +16,15 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 include(${CMAKE_SOURCE_DIR}/cmake/AssetCopy.cmake)
 
+# Shared sample inputs copied next to the runtime binaries in build/bin/asset.
+add_asset_copy_target("${CMAKE_SOURCE_DIR}/asset")
+
 include(CTest)
 
 add_subdirectory(src)
 add_subdirectory(net)
 add_subdirectory(runtime)
-add_subdirectory(examples)
+add_subdirectory(jobs)
 add_subdirectory(apps)
 
 if(BUILD_TESTING)
