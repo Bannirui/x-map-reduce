@@ -20,11 +20,16 @@ TODO
     - duplicate slow tasks
     - first attempt wins
   - [ ] V5.2 heartbeat liveness
-    - extract worker management into its own class (`WorkerRegistry`: registration, idle/liveness), mirroring how `Scheduler` isolates task scheduling; the master keeps only I/O
     - [X] 定时任务功能 队列+selector
       - [X] 小根堆+多个缓存标识逻辑删除
       - [X] 打标标识逻辑删除
+      - [ ] 定时任务id的哨兵值0抽出来
     - [X] worker-master两端的ping-pong
+    - [ ] 抽离master的资源管理职责
+      - [ ] 注册/身份(accept+Hello)
+      - [ ] 空闲/忙(idle, lastRequest)
+      - [ ] 存活/心跳(lastSeen, watchdog, 超时判定)
+      - [ ] 任务归属(worker -> 持有的 task/attempt，供重发)
 - [ ] V6 Job submission—submit arbitrary map/reduce to the master
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface
@@ -44,11 +49,11 @@ TODO
   - [X] V8.4 更换协议
   - [X] V8.5 reactor模型 master/worker
   - [ ] V8.6 reactor robustness
-    - heartbeat (`Ping`/`Pong`) + timeouts
-    - disconnect/task-failure handling (retry instead of aborting the job)
+    - [X] heartbeat (`Ping`/`Pong`) + timeouts
+    - [ ] disconnect/task-failure handling (retry instead of aborting the job)
   - [ ] V8.7 large-blob streaming
     - use `flags.More` + `offset` so `Data`/`MapOutput` are chunked
     - drop the single 64MB frame ceiling
-  - [ ] V8.8 move map/reduce compute off the event loop / multi-reactor
+  - [ ] V8.8 move map/reduce compute off the event loop / multi-reactor (boss/work group, refer to Netty)
     - business work on a thread pool (Netty-style)
     - boss/acceptor + worker reactors

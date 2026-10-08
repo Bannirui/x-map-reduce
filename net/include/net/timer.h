@@ -39,6 +39,9 @@ namespace xmr::net {
          */
         int timeoutMs(TimePoint now = Clock::now());
 
+        /**
+         * @param now 这个时间有没有到期的定时任务可以执行
+         */
         void fire(TimePoint now = Clock::now());
 
         bool empty() const {
@@ -47,7 +50,7 @@ namespace xmr::net {
 
     private:
         struct Timer {
-            // 任务编号
+            // 任务编号 0是哨兵无效值 有效值是从1开始的
             TimerId id = 0;
             TimePoint deadline;
             Duration interval{};
