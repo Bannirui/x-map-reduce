@@ -1,5 +1,6 @@
 #include"net/event_loop.h"
 #include"net/net.h"
+#include"net/timer.h"
 #include"protocol/framing.h"
 #include"protocol/messages.h"
 #include"runtime/exit_code.h"
@@ -10,6 +11,7 @@
 #include"runtime/task_codec.h"
 
 #include<algorithm>
+#include<chrono>
 #include<cstdint>
 #include<fstream>
 #include<iostream>
@@ -25,6 +27,9 @@
 #include<unistd.h>
 
 namespace {
+    // master判定worker心跳超时的阈值
+    constexpr std::chrono::seconds kHeartbeatTimeout{6};
+
     void usage(const char* program) {
         std::cerr << "Usage: " << program
             << " --job <name> [--plugin <path>]... [--reducers <R>] [--workers <N>]"
@@ -60,6 +65,10 @@ namespace {
         bool idle = false;
         std::string id;
         std::uint32_t lastRequest = 0;
+        // 最近一次收到该worker消息的时间
+        std::chrono::steady_clock::time_point lastSeen;
+        // 心跳看门狗 收到消息就重置
+        xmr::net::TimerQueue::TimerId watchdog = 0;
     };
 } // namespace
 
@@ -133,6 +142,9 @@ int main(int argc, char** argv) {
 
         xmr::net::Poller poller;
         poller.add(listener.fd(), xmr::net::kReadable);
+        xmr::net::TimerQueue timers;
+        bool workerLost = false;
+        std::string lostReason;
 
         // M*R 每个map任务要对自己的输出进行R的分区
         std::vector<std::vector<std::string> > mapOutput(inputs.size(), std::vector<std::string>(reducers));
@@ -167,6 +179,17 @@ int main(int argc, char** argv) {
             const auto frame = xmr::protocol::makeFrame(type, requestId, body, flags);
             worker.out.append(frame);
             flush(worker);
+        };
+
+        // 收到worker消息就重置它的心跳看门狗
+        auto armWatchdog = [&](Worker& worker) {
+            timers.cancel(worker.watchdog);
+            worker.lastSeen = std::chrono::steady_clock::now();
+            Worker* target = &worker;
+            worker.watchdog = timers.addAfter(kHeartbeatTimeout, [target, &workerLost, &lostReason] {
+                workerLost = true;
+                lostReason = "worker " + target->id + " heartbeat timeout";
+            });
         };
 
         // master收worker发过来的消息
@@ -241,6 +264,14 @@ int main(int argc, char** argv) {
                                   std::make_move_iterator(pairs.begin()), std::make_move_iterator(pairs.end()));
                     break;
                 }
+                case xmr::protocol::MessageType::Ping: {
+                    // worker周期心跳 master回Pong
+                    const auto ping = xmr::protocol::Ping::decode(frame.body);
+                    xmr::protocol::Pong pong;
+                    pong.nonce = ping.nonce;
+                    sendTo(worker, xmr::protocol::MessageType::Pong, frame.header.requestId, pong.encode());
+                    break;
+                }
                 default:
                     throw std::runtime_error("unexpected control message");
             }
@@ -265,6 +296,7 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("worker disconnected");
             }
             processInput(worker);
+            armWatchdog(worker);
         };
 
         auto acceptWorkers = [&] {
@@ -306,7 +338,7 @@ int main(int argc, char** argv) {
         };
 
         while (!scheduler.finished() && !scheduler.failed()) {
-            for (const auto& event : poller.wait(-1)) {
+            for (const auto& event : poller.wait(timers.timeoutMs())) {
                 if (event.fd == listener.fd()) {
                     acceptWorkers();
                     continue;
@@ -321,6 +353,10 @@ int main(int argc, char** argv) {
                 if (event.events & (xmr::net::kReadable | xmr::net::kBroken)) {
                     readWorker(*it->second);
                 }
+            }
+            timers.fire();
+            if (workerLost) {
+                throw std::runtime_error(lostReason);
             }
             dispatch();
         }

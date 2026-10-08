@@ -24,6 +24,7 @@ TODO
     - [X] 定时任务功能 队列+selector
       - [X] 小根堆+多个缓存标识逻辑删除
       - [X] 打标标识逻辑删除
+    - [X] worker-master两端的ping-pong
 - [ ] V6 Job submission—submit arbitrary map/reduce to the master
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface

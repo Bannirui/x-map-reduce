@@ -1,5 +1,6 @@
 #include"net/event_loop.h"
 #include"net/net.h"
+#include"net/timer.h"
 #include"protocol/framing.h"
 #include"protocol/messages.h"
 #include"runtime/exit_code.h"
@@ -7,6 +8,7 @@
 #include"runtime/task.h"
 #include"runtime/task_codec.h"
 
+#include<chrono>
 #include<cstdint>
 #include<iostream>
 #include<optional>
@@ -19,6 +21,9 @@
 #include<unistd.h>
 
 namespace {
+    // worker上报心跳的周期
+    constexpr std::chrono::seconds kHeartbeatInterval{2};
+
     enum class Stage {
         RequestTask,
         WaitingTask,
@@ -119,6 +124,15 @@ int main(int argc, char** argv) {
             flush();
         };
 
+        // 周期给master上报心跳
+        xmr::net::TimerQueue timers;
+        std::uint64_t heartbeatNonce = 0;
+        timers.addInterval(kHeartbeatInterval, [&] {
+            xmr::protocol::Ping ping;
+            ping.nonce = ++heartbeatNonce;
+            sendFrame(xmr::protocol::MessageType::Ping, 0, ping.encode());
+        });
+
         auto finishMap = [&](const xmr::Task& task, const std::string& content) {
             // map产出的中间结果 已经按照R分区好了 现在还放在worker的内存上 等着shuffle
             const auto parts = xmr::runMapTask(task, content);
@@ -158,6 +172,10 @@ int main(int argc, char** argv) {
             if (frame.header.type == xmr::protocol::MessageType::Stop) {
                 // master告诉worker任务结束了 可以关停了
                 stopped = true;
+                return;
+            }
+            if (frame.header.type == xmr::protocol::MessageType::Pong) {
+                // master对心跳的应答 暂时不需要处理
                 return;
             }
             if (frame.header.type == xmr::protocol::MessageType::Task) {
@@ -245,7 +263,7 @@ int main(int argc, char** argv) {
                 stage = Stage::WaitingTask;
             }
 
-            for (const auto& event : poller.wait(-1)) {
+            for (const auto& event : poller.wait(timers.timeoutMs())) {
                 if (event.events & xmr::net::kWritable) {
                     flush();
                 }
@@ -271,6 +289,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            timers.fire();
         }
     } catch (const UsageError& error) {
         std::cerr << "worker: " << error.what() << '\n';
