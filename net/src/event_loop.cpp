@@ -4,6 +4,7 @@
 #include<cstring>
 #include<stdexcept>
 #include<string>
+#include<utility>
 
 #include<unistd.h>
 
@@ -67,6 +68,107 @@ namespace xmr::net {
                 result.push_back(Event{events[i].data.fd, events[i].events});
             }
             return result;
+        }
+    }
+
+    EventLoop::EventLoop() {
+        poller_.add(notifier_.fd(), kReadable);
+    }
+
+    EventLoop::~EventLoop() {
+        stop();
+    }
+
+    void EventLoop::run() {
+        threadId_ = std::this_thread::get_id();
+        while (!stopping_.load()) {
+            for (const Event& event : poller_.wait(timers_.timeoutMs())) {
+                if (event.fd == notifier_.fd()) {
+                    notifier_.drain();
+                    doPending();
+                    continue;
+                }
+                const auto it = handlers_.find(event.fd);
+                if (it != handlers_.end()) {
+                    it->second(event.events);
+                }
+            }
+            timers_.fire();
+            doPending();
+        }
+    }
+
+    void EventLoop::stop() {
+        stopping_.store(true);
+        wakeup();
+    }
+
+    void EventLoop::runInLoop(std::function<void()> task) {
+        if (isInLoopThread()) {
+            task();
+        } else {
+            queueInLoop(std::move(task));
+        }
+    }
+
+    void EventLoop::queueInLoop(std::function<void()> task) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_.push(std::move(task));
+        }
+        wakeup();
+    }
+
+    void EventLoop::add(int fd, std::uint32_t events, Handler handler) {
+        runInLoop([this, fd, events, handler = std::move(handler)]() mutable {
+            handlers_[fd] = std::move(handler);
+            poller_.add(fd, events);
+        });
+    }
+
+    void EventLoop::modify(int fd, std::uint32_t events) {
+        runInLoop([this, fd, events] {
+            poller_.modify(fd, events);
+        });
+    }
+
+    void EventLoop::remove(int fd) {
+        runInLoop([this, fd] {
+            poller_.remove(fd);
+            handlers_.erase(fd);
+        });
+    }
+
+    TimerQueue::TimerId EventLoop::addTimer(TimerQueue::Duration delay, TimerQueue::Callback callback) {
+        return timers_.addAfter(delay, std::move(callback));
+    }
+
+    TimerQueue::TimerId EventLoop::addInterval(TimerQueue::Duration interval, TimerQueue::Callback callback) {
+        return timers_.addInterval(interval, std::move(callback));
+    }
+
+    bool EventLoop::cancelTimer(TimerQueue::TimerId id) {
+        return timers_.cancel(id);
+    }
+
+    bool EventLoop::isInLoopThread() const {
+        return std::this_thread::get_id() == threadId_;
+    }
+
+    void EventLoop::wakeup() {
+        notifier_.notify();
+    }
+
+    void EventLoop::doPending() {
+        std::queue<std::function<void()> > ready;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ready.swap(pending_);
+        }
+        while (!ready.empty()) {
+            std::function<void()> task = std::move(ready.front());
+            ready.pop();
+            task();
         }
     }
 } // namespace xmr::net

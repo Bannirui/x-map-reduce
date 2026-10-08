@@ -20,6 +20,10 @@ add_executable(notifier_test notifier_test.cpp)
 target_link_libraries(notifier_test PRIVATE x-net)
 add_test(NAME notifier_test COMMAND notifier_test)
 
+add_executable(event_loop_test event_loop_test.cpp)
+target_link_libraries(event_loop_test PRIVATE x-net Threads::Threads)
+add_test(NAME event_loop_test COMMAND event_loop_test)
+
 add_executable(worker_registry_test worker_registry_test.cpp)
 target_link_libraries(worker_registry_test PRIVATE x-runtime)
 add_test(NAME worker_registry_test COMMAND worker_registry_test)

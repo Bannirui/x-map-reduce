@@ -65,6 +65,7 @@ TODO
   - [ ] V8.8 move map/reduce compute off the event loop / multi-reactor (boss/work group, refer to Netty)
     - [X] worker用线程池把map/reduce移出reactor
     - [ ] boss/acceptor+worker reactors
+      - [X] 模拟Netty的EventLoop线程模型
 - [ ] 文件系统 模拟入口的大数据量文件 耦合or外部实现
 - [ ] master角色任务过重 拆分问题
   - [X] worker管理
