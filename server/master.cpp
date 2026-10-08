@@ -29,6 +29,8 @@
 namespace {
     // master判定worker心跳超时的阈值
     constexpr std::chrono::seconds kHeartbeatTimeout{6};
+    // 单个任务执行超时的阈值 超了就重发
+    constexpr std::chrono::seconds kTaskTimeout{30};
 
     void usage(const char* program) {
         std::cerr << "Usage: " << program
@@ -136,7 +138,7 @@ int main(int argc, char** argv) {
 
         xmr::net::Poller poller;
         poller.add(listener.fd(), xmr::net::kReadable);
-        xmr::WorkerRegistry registry(kHeartbeatTimeout);
+        xmr::WorkerRegistry registry(kHeartbeatTimeout, kTaskTimeout);
         std::unordered_map<std::string, Worker*> byId;
 
         // M*R 每个map任务要对自己的输出进行R的分区
@@ -278,14 +280,18 @@ int main(int argc, char** argv) {
             }
         };
 
-        // 回收worker持有的任务 重发 次数用尽才判整个job失败
+        // 重发任务 次数用尽才判整个job失败
+        auto retryOrFail = [&](const xmr::Task& task) {
+            if (!scheduler.retry(task)) {
+                scheduler.markFailed(task.kind, task.id, "attempts exhausted");
+            }
+        };
+
+        // 回收worker持有的任务 重发
         auto requeueTask = [&](const std::string& id) {
             const auto task = registry.reclaim(id);
-            if (!task) {
-                return;
-            }
-            if (!scheduler.retry(*task)) {
-                scheduler.markFailed(task->kind, task->id, "attempts exhausted");
+            if (task) {
+                retryOrFail(*task);
             }
         };
 
@@ -356,7 +362,7 @@ int main(int argc, char** argv) {
                 if (!task) {
                     break;
                 }
-                const auto id = registry.assignNext(*task);
+                const auto id = registry.assignNext(*task, std::chrono::steady_clock::now());
                 if (!id) {
                     break;
                 }
@@ -385,8 +391,12 @@ int main(int argc, char** argv) {
                     readWorker(*it->second);
                 }
             }
-            for (const auto& id : registry.pollExpired(std::chrono::steady_clock::now())) {
+            const auto expired = registry.poll(std::chrono::steady_clock::now());
+            for (const auto& id : expired.workers) {
                 requeueTask(id);
+            }
+            for (const auto& task : expired.tasks) {
+                retryOrFail(task);
             }
             dispatch();
         }

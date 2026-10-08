@@ -17,7 +17,7 @@ TODO
       - [X] Scheduler: attempt+requeue(放回未完成任务，first attempt wins)
       - [X] 陈旧attempt防护(迟到MapOutput/Done不覆盖新attempt)
     - task timeouts
-      - [ ] 单任务超时重派(复用 TimerQueue)
+      - [X] 单任务超时重派(复用 TimerQueue)
     - worker-death recovery
       - [X] WorkerRegistry: Lost可复活/remove取回持有的task
       - [X] master: pollExpired/taskOf/requeue/remove重派 断开走同一路径
@@ -37,7 +37,7 @@ TODO
         - [X] 存活/心跳(lastSeen, watchdog, 超时判定)
         - [X] 任务归属(worker->持有的task/attempt，供重发)
       - [X] master接入 只留 I/O，管理逻辑迁出
-      - [ ] worker假死重新上线回收
+      - [X] worker假死重新上线回收
 - [ ] V6 Job submission—submit arbitrary map/reduce to the master
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface

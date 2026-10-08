@@ -38,8 +38,9 @@ namespace xmr {
 
         /**
          * @param heartbeatTimeout worker心跳超时的阈值是多少
+         * @param taskTimeout 任务的超时期限 超过这个时间worker还没上报完成 master就要重新派发任务了
          */
-        explicit WorkerRegistry(std::chrono::milliseconds heartbeatTimeout);
+        explicit WorkerRegistry(std::chrono::milliseconds heartbeatTimeout, std::chrono::milliseconds taskTimeout);
 
         /**
          * @param id worker的id
@@ -68,8 +69,9 @@ namespace xmr {
         /**
          * master找到空闲的worker给它派个任务
          * @param task 什么任务
+         * @param now 给任务看门狗用的 在任务执行超时时间阈值内master没收到worker上报的完成消息 master就要重新派发这个任务了
          */
-        std::optional<std::string> assignNext(const Task& task);
+        std::optional<std::string> assignNext(const Task& task, TimePoint now = Clock::now());
 
         /**
          * worker给master汇报Done后 master把worker状态置到初始
@@ -80,9 +82,14 @@ namespace xmr {
 
         /**
          * @param now 看看now这个时间有没有看门狗任务到期了
-         * @return 被master判定下线的worker
+         * @return 被master判定下线的worker 以及超时需要重发的任务
          */
-        std::vector<std::string> pollExpired(TimePoint now);
+        struct Expired {
+            std::vector<std::string> workers;
+            std::vector<Task> tasks;
+        };
+
+        Expired poll(TimePoint now);
 
         /**
          * 基于now最近的一个看门狗啥时候执行
@@ -123,6 +130,8 @@ namespace xmr {
             TimePoint lastSeen;
             // master对worker心跳看门狗定时任务编号 定时任务编号0是哨兵无效值 有效值是从1开始的
             net::TimerQueue::TimerId watchdog = net::TimerQueue::kInvalidId;
+            // 单个任务的超时看门狗定时任务编号
+            net::TimerQueue::TimerId taskWatchdog = net::TimerQueue::kInvalidId;
             // worker处理的任务
             std::optional<Task> task;
         };
@@ -145,13 +154,24 @@ namespace xmr {
          */
         void onTimeout(const std::string& id);
 
+        /**
+         * 回调服务给看门狗用的
+         * 每个任务都有超时要求 worker没有即使完成上报 等超时一到这个任务就要被回收 下次派发给其他worker了
+         * @param id worker
+         */
+        void onTaskTimeout(const std::string& id);
+
         // master管理着注册进来的worker
         std::unordered_map<std::string, Entry> workers_;
         // 定时任务队列
         net::TimerQueue timers_;
         // master判定主观下线的worker
         std::vector<std::string> lost_;
+        // worker执行超时 master回收任务 需要重发的任务
+        std::vector<Task> timedOutTasks_;
         // worker的心跳超时阈值 超过这个时间master没有收到worker的心跳就判定crash了
         std::chrono::milliseconds heartbeatTimeout_;
+        // 单个任务的超时阈值 超过这个时间任务还没做完就重发
+        std::chrono::milliseconds taskTimeout_;
     };
 } // namespace xmr

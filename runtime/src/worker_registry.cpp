@@ -4,10 +4,14 @@
 #include<utility>
 
 namespace xmr {
-    WorkerRegistry::WorkerRegistry(std::chrono::milliseconds heartbeatTimeout)
-        : heartbeatTimeout_(heartbeatTimeout) {
+    WorkerRegistry::WorkerRegistry(std::chrono::milliseconds heartbeatTimeout,
+                                   std::chrono::milliseconds taskTimeout)
+        : heartbeatTimeout_(heartbeatTimeout), taskTimeout_(taskTimeout) {
         if (heartbeatTimeout_ <= std::chrono::milliseconds::zero()) {
             throw std::runtime_error("heartbeat timeout must be positive");
+        }
+        if (taskTimeout_ <= std::chrono::milliseconds::zero()) {
+            throw std::runtime_error("task timeout must be positive");
         }
     }
 
@@ -31,6 +35,7 @@ namespace xmr {
         }
         // 删除对worker的心跳看门狗
         timers_.cancel(it->second.watchdog);
+        timers_.cancel(it->second.taskWatchdog);
         // 注册列表中移除
         workers_.erase(it);
         return true;
@@ -62,14 +67,17 @@ namespace xmr {
         return true;
     }
 
-    std::optional<std::string> WorkerRegistry::assignNext(const Task& task) {
+    std::optional<std::string> WorkerRegistry::assignNext(const Task& task, TimePoint now) {
         for (auto& [id, entry] : workers_) {
             if (entry.state != WorkerState::Idle) {
                 // 找到空闲的worker给它派任务
                 continue;
             }
+            const std::string workerId = id;
             entry.state = WorkerState::Busy;
             entry.task = task;
+            // master给任务安一个超时看门狗 任务超时了worker还没上报完成 master就要重新派发任务
+            entry.taskWatchdog = timers_.addAfter(taskTimeout_, [this, workerId] { onTaskTimeout(workerId); }, now);
             return id;
         }
         return std::nullopt;
@@ -80,18 +88,21 @@ namespace xmr {
         if (it == workers_.end() || it->second.state == WorkerState::Lost) {
             return false;
         }
+        timers_.cancel(it->second.taskWatchdog);
+        it->second.taskWatchdog = net::TimerQueue::kInvalidId;
         it->second.state = WorkerState::Registered;
         it->second.task.reset();
         return true;
     }
 
-    std::vector<std::string> WorkerRegistry::pollExpired(TimePoint now) {
-        // 因为下面看门狗服务可能调用操作缓存 所以先清空这个缓存
+    WorkerRegistry::Expired WorkerRegistry::poll(TimePoint now) {
         lost_.clear();
-        // 看看现在有没有看门狗到期了执行一下 一旦有看门狗定时任务到期了 就会有worker被判定下线被放到workers里面
+        timedOutTasks_.clear();
+        // 看看现在有没有看门狗到期了执行一下
         timers_.fire(now);
-        std::vector<std::string> expired;
-        expired.swap(lost_);
+        Expired expired;
+        expired.workers.swap(lost_);
+        expired.tasks.swap(timedOutTasks_);
         return expired;
     }
 
@@ -124,6 +135,8 @@ namespace xmr {
         if (it == workers_.end()) {
             return std::nullopt;
         }
+        timers_.cancel(it->second.taskWatchdog);
+        it->second.taskWatchdog = net::TimerQueue::kInvalidId;
         std::optional<Task> task = it->second.task;
         it->second.task.reset();
         return task;
@@ -158,7 +171,22 @@ namespace xmr {
         it->second.state = WorkerState::Lost;
         // 心跳看门狗的定时任务编号抹成哨兵值
         it->second.watchdog = net::TimerQueue::kInvalidId;
+        // 任务超时看门狗不在这里处理 任务留在entry里等master回收重发
+        timers_.cancel(it->second.taskWatchdog);
+        it->second.taskWatchdog = net::TimerQueue::kInvalidId;
         // 判定主观下线
         lost_.push_back(id);
+    }
+
+    void WorkerRegistry::onTaskTimeout(const std::string& id) {
+        const auto it = workers_.find(id);
+        if (it == workers_.end() || !it->second.task) {
+            return;
+        }
+        // 任务超时了 worker还活着 把任务摘出来交给master重发
+        timedOutTasks_.push_back(*it->second.task);
+        // 这个worker没有按照要求时间完成 已经不配拥有这个任务了
+        it->second.task.reset();
+        it->second.taskWatchdog = net::TimerQueue::kInvalidId;
     }
 } // namespace xmr
