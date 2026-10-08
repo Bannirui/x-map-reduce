@@ -152,6 +152,15 @@ namespace xmr::protocol {
         return frame;
     }
 
+    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId,
+                                        const std::vector<std::uint8_t>& body, std::uint16_t flags) {
+        Header header;
+        header.type = type;
+        header.flags = flags;
+        header.requestId = requestId;
+        return encodeFrame(header, body);
+    }
+
     void appendVarint(std::vector<std::uint8_t>& out, std::uint64_t value) {
         while (value >= 0x80u) {
             out.push_back(static_cast<std::uint8_t>(value) | 0x80u);

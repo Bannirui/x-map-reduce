@@ -215,13 +215,24 @@ int main() {
 
         {
             FieldWriter writer;
-            writer.putU64(taskMsg::kKind, 2);
+            writer.putU64(taskMsg::kKind, 3);
             writer.putU64(taskMsg::kTaskId, 0);
             writer.putString(taskMsg::kJob, "word_count");
             writer.putU64(taskMsg::kReducers, 1);
             writer.putU64(taskMsg::kMaps, 1);
             check(throwsProtocol([&] { TaskMessage::decode(writer.take()); }),
                   "out-of-range work kind should throw");
+        }
+
+        {
+            FieldWriter writer;
+            writer.putU64(taskMsg::kKind, static_cast<std::uint64_t>(WorkKind::None));
+            writer.putU64(taskMsg::kTaskId, 0);
+            writer.putString(taskMsg::kJob, "word_count");
+            writer.putU64(taskMsg::kReducers, 1);
+            writer.putU64(taskMsg::kMaps, 1);
+            check(throwsProtocol([&] { TaskMessage::decode(writer.take()); }),
+                  "unset work kind should throw");
         }
 
         {

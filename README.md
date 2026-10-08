@@ -82,3 +82,5 @@ wait
   - [X] V8.1 [protocl enhanceman](./protocol/PROTOCOL.md)
   - [X] V8.2 message and encoder/decoder
   - [X] V8.3 nonblocking socket
+  - [X] V8.4 更换协议
+  - [ ] V8.5 reactor模型

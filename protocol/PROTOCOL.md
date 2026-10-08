@@ -117,6 +117,8 @@ TLV只是body的容器 每条消息用哪些`fieldId`由注册表规定
 
 `fieldId`在**每条消息内**编号（不同消息可复用同一编号）未列出的编号保留
 
+`kind`字段统一使用`WorkKind` `None = 0` `Map = 1<<0 = 1` `Reduce = 1<<1 = 2` 它是**单选**（用`==`判断 不是位掩码）必填消息中`None`视为非法
+
 ### HELLO (W→C)
 | id | 字段 | 类型 |
 |---:|------|------|
@@ -140,7 +142,7 @@ TLV只是body的容器 每条消息用哪些`fieldId`由注册表规定
 ### TASK (C→W)
 | id | 字段 | 类型 |
 |---:|------|------|
-| 1 | `kind`     | Varint (`0=Map` `1=Reduce`) |
+| 1 | `kind`     | Varint (`1=Map`, `2=Reduce`；`0=None` 表示未设置，必填消息中非法) |
 | 2 | `taskId`   | Varint |
 | 3 | `job`      | Bytes (string) |
 | 4 | `reducers` | Varint |

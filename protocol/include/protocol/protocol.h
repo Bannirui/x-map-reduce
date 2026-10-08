@@ -122,6 +122,9 @@ namespace xmr::protocol {
      */
     std::vector<std::uint8_t> encodeFrame(const Header& header, const std::vector<std::uint8_t>& payload);
 
+    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId,
+                                        const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
+
     void appendVarint(std::vector<std::uint8_t>& out, std::uint64_t value);
 
     std::string_view messageTypeName(MessageType type);

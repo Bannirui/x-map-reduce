@@ -8,9 +8,13 @@
 #include<vector>
 
 namespace xmr::protocol {
+    // worker节点上跑的是什么任务 map函数还是reduce函数
     enum class WorkKind : std::uint8_t {
-        Map = 0,
-        Reduce = 1,
+        None = 0,
+        // map任务
+        Map = 1u << 0,
+        // reduce任务
+        Reduce = 1u << 1,
     };
 
     struct Hello {
@@ -43,7 +47,7 @@ namespace xmr::protocol {
     };
 
     struct TaskMessage {
-        WorkKind kind = WorkKind::Map;
+        WorkKind kind = WorkKind::None;
         std::uint64_t taskId = 0;
         std::string job;
         std::uint64_t reducers = 1;
@@ -105,7 +109,7 @@ namespace xmr::protocol {
     };
 
     struct Done {
-        WorkKind kind = WorkKind::Map;
+        WorkKind kind = WorkKind::None;
         std::uint64_t taskId = 0;
 
         std::vector<std::uint8_t> encode() const;
@@ -114,7 +118,7 @@ namespace xmr::protocol {
     };
 
     struct Fail {
-        WorkKind kind = WorkKind::Map;
+        WorkKind kind = WorkKind::None;
         std::uint64_t taskId = 0;
         StatusCode statusCode = StatusCode::Unknown;
         std::string reason;
@@ -147,7 +151,4 @@ namespace xmr::protocol {
 
         static Stop decode(const std::vector<std::uint8_t>& body);
     };
-
-    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId,
-                                        const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
 } // namespace xmr::protocol

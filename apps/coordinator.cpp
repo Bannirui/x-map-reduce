@@ -1,9 +1,11 @@
 #include"net/net.h"
+#include"protocol/messages.h"
 #include"runtime/exit_code.h"
 #include"runtime/jobs.h"
 #include"runtime/plugin.h"
 #include"runtime/scheduler.h"
 #include"runtime/task.h"
+#include"runtime/wire.h"
 
 #include<algorithm>
 #include<cerrno>
@@ -39,14 +41,25 @@ namespace {
                 static_cast<std::uint16_t>(std::stoul(endpoint.substr(colon + 1)))};
     }
 
-    xmr::TaskKind kindOf(const std::string& token) {
-        if (token == "MAP") {
-            return xmr::TaskKind::Map;
+    xmr::protocol::WorkKind wireKind(xmr::TaskKind kind) {
+        return kind == xmr::TaskKind::Map ? xmr::protocol::WorkKind::Map : xmr::protocol::WorkKind::Reduce;
+    }
+
+    xmr::TaskKind taskKind(xmr::protocol::WorkKind kind) {
+        return kind == xmr::protocol::WorkKind::Map ? xmr::TaskKind::Map : xmr::TaskKind::Reduce;
+    }
+
+    xmr::protocol::TaskMessage toTaskMessage(const xmr::Task& task) {
+        xmr::protocol::TaskMessage message;
+        message.kind = wireKind(task.kind);
+        message.taskId = task.id;
+        message.job = task.job;
+        message.reducers = task.reducers;
+        message.maps = task.maps;
+        if (task.kind == xmr::TaskKind::Map) {
+            message.input = task.input;
         }
-        if (token == "REDUCE") {
-            return xmr::TaskKind::Reduce;
-        }
-        throw std::runtime_error("bad task kind '" + token + "'");
+        return message;
     }
 
     std::vector<std::uint8_t> toBytes(const std::string& text) {
@@ -58,33 +71,12 @@ namespace {
         return std::string(bytes.begin(), bytes.end());
     }
 
-    /**
-     * net协议两层 第2层是纯文本协议
-     * @param text 文本协议
-     * @param fields 要从源文本里面解析出几个tab隔开的字段
-     * @param rest 源文本解析完剩下来原封不动的数据
-     */
-    std::vector<std::string> splitHead(const std::string& text, std::size_t fields, std::string& rest) {
-        std::vector<std::string> head;
-        std::size_t start = 0;
-        for (std::size_t i = 0; i < fields; ++i) {
-            const std::size_t tab = text.find('\t', start);
-            if (tab == std::string::npos) {
-                head.push_back(text.substr(start));
-                rest.clear();
-                return head;
-            }
-            head.push_back(text.substr(start, tab - start));
-            start = tab + 1;
-        }
-        rest = text.substr(start);
-        return head;
-    }
-
     struct Worker {
         xmr::net::Connection connection;
         // worker节点状态
         bool idle = false;
+        std::string id;
+        std::uint32_t lastRequest = 0;
     };
 } // namespace
 
@@ -161,68 +153,81 @@ int main(int argc, char** argv) {
         // master收worker发过来的消息
         auto handleMessage = [&](Worker& worker) {
             // 收到来自worker的消息
-            const std::string message = toString(worker.connection.receive());
-            std::string rest;
+            const xmr::protocol::Frame frame = xmr::receiveFrame(worker.connection.fd());
             // 源文本里面第一个字段是命令名
-            const std::vector<std::string> head = splitHead(message, 1, rest);
-            if (head.empty()) {
-                throw std::runtime_error("empty control message");
-            }
-            const std::string& command = head[0];
-
-            if (command == "HELLO") {
-                // worker启动的时候给master发一下
-            } else if (command == "REQUEST") {
-                // worker告诉master它空闲了 希望master给它派任务
-                worker.idle = true;
-            } else if (command == "DONE") {
-                std::string tail;
-                const auto fields = splitHead(rest, 2, tail);
-                scheduler.markDone(kindOf(fields[0]));
-                worker.idle = false;
-            } else if (command == "FAIL") {
-                std::string tail;
-                const auto fields = splitHead(rest, 3, tail);
-                scheduler.markFailed(kindOf(fields[0]), std::stoul(fields[1]), fields[2]);
-                worker.idle = false;
-            } else if (command == "MAPOUT") {
-                // worker告诉master它完成了map任务 并把中间结果发送过来了
-                std::string blob;
-                const auto fields = splitHead(rest, 2, blob);
-                const std::size_t task = std::stoul(fields[0]);
-                const std::size_t partition = std::stoul(fields[1]);
-                if (task >= mapOutput.size() || partition >= reducers) {
-                    throw std::runtime_error("MAPOUT out of range");
+            switch (frame.header.type) {
+                case xmr::protocol::MessageType::Hello: {
+                    // worker启动的时候给master发一下
+                    worker.id = xmr::protocol::Hello::decode(frame.body).workerId;
+                    break;
                 }
-                mapOutput[task][partition] = std::move(blob);
-            } else if (command == "FETCH") {
-                // worker准备执行reduce 跟master要reduce需要的kv
-                std::string tail;
-                const auto fields = splitHead(rest, 2, tail);
-                const std::size_t task = std::stoul(fields[0]);
-                const std::size_t partition = std::stoul(fields[1]);
-                if (task >= mapOutput.size() || partition >= reducers) {
-                    throw std::runtime_error("FETCH out of range");
+                case xmr::protocol::MessageType::RequestTask: {
+                    // worker告诉master它空闲了 希望master给它派任务
+                    worker.idle = true;
+                    worker.lastRequest = frame.header.requestId;
+                    break;
                 }
-                worker.connection.send(toBytes("DATA\t" + mapOutput[task][partition]));
-            } else if (command == "INPUT") {
-                // worker准备执行map函数了 跟master要map需要的文件数据
-                std::string tail;
-                const auto fields = splitHead(rest, 1, tail);
-                const std::size_t id = std::stoul(fields[0]);
-                if (id >= inputData.size()) {
-                    throw std::runtime_error("INPUT out of range");
+                case xmr::protocol::MessageType::Done: {
+                    const auto done = xmr::protocol::Done::decode(frame.body);
+                    scheduler.markDone(taskKind(done.kind));
+                    worker.idle = false;
+                    break;
                 }
-                worker.connection.send(toBytes("DATA\t" + inputData[id]));
-            } else if (command == "RESULT") {
-                // worker窒息给你执行完了reduce 把最终结果给到了master
-                std::string blob;
-                const auto fields = splitHead(rest, 1, blob);
-                auto pairs = xmr::deserializeKeyValues(blob);
-                merged.insert(merged.end(),
-                              std::make_move_iterator(pairs.begin()), std::make_move_iterator(pairs.end()));
-            } else {
-                throw std::runtime_error("unexpected control message '" + command + "'");
+                case xmr::protocol::MessageType::Fail: {
+                    const auto fail = xmr::protocol::Fail::decode(frame.body);
+                    scheduler.markFailed(taskKind(fail.kind), fail.taskId, fail.reason);
+                    worker.idle = false;
+                    break;
+                }
+                case xmr::protocol::MessageType::MapOutput: {
+                    // worker告诉master它完成了map任务 并把中间结果发送过来了
+                    const auto output = xmr::protocol::MapOutput::decode(frame.body);
+                    if (output.mapTask >= mapOutput.size() || output.partition >= reducers) {
+                        throw std::runtime_error("MAPOUT out of range");
+                    }
+                    mapOutput[output.mapTask][output.partition] = toString(output.payload);
+                    break;
+                }
+                case xmr::protocol::MessageType::Fetch: {
+                    // worker准备执行reduce 跟master要reduce需要的kv
+                    const auto fetch = xmr::protocol::Fetch::decode(frame.body);
+                    if (fetch.mapTask >= mapOutput.size() || fetch.partition >= reducers) {
+                        throw std::runtime_error("FETCH out of range");
+                    }
+                    const std::string& blob = mapOutput[fetch.mapTask][fetch.partition];
+                    xmr::protocol::DataMessage data;
+                    data.offset = 0;
+                    data.total = blob.size();
+                    data.payload = toBytes(blob);
+                    xmr::sendFrame(worker.connection.fd(), xmr::protocol::MessageType::Data,
+                                   frame.header.requestId, data.encode());
+                    break;
+                }
+                case xmr::protocol::MessageType::InputRequest: {
+                    // worker准备执行map函数了 跟master要map需要的文件数据
+                    const auto request = xmr::protocol::InputRequest::decode(frame.body);
+                    if (request.taskId >= inputData.size()) {
+                        throw std::runtime_error("INPUT out of range");
+                    }
+                    const std::string& blob = inputData[request.taskId];
+                    xmr::protocol::DataMessage data;
+                    data.offset = 0;
+                    data.total = blob.size();
+                    data.payload = toBytes(blob);
+                    xmr::sendFrame(worker.connection.fd(), xmr::protocol::MessageType::Data,
+                                   frame.header.requestId, data.encode());
+                    break;
+                }
+                case xmr::protocol::MessageType::Result: {
+                    // worker窒息给你执行完了reduce 把最终结果给到了master
+                    const auto result = xmr::protocol::ResultMessage::decode(frame.body);
+                    auto pairs = xmr::deserializeKeyValues(toString(result.payload));
+                    merged.insert(merged.end(),
+                                  std::make_move_iterator(pairs.begin()), std::make_move_iterator(pairs.end()));
+                    break;
+                }
+                default:
+                    throw std::runtime_error("unexpected control message");
             }
         };
 
@@ -239,7 +244,9 @@ int main(int argc, char** argv) {
                     break;
                 }
                 // master向worker派发任务
-                worker.connection.send(toBytes("TASK\t" + task->serialize()));
+                const auto message = toTaskMessage(*task);
+                xmr::sendFrame(worker.connection.fd(), xmr::protocol::MessageType::Task,
+                               worker.lastRequest, message.encode());
                 worker.idle = false;
             }
         };
@@ -274,7 +281,8 @@ int main(int argc, char** argv) {
 
         for (auto& worker : workers) {
             try {
-                worker.connection.send(toBytes("STOP"));
+                xmr::protocol::Stop stop;
+                xmr::sendFrame(worker.connection.fd(), xmr::protocol::MessageType::Stop, 0, stop.encode());
                 // Half-close, then drain any in-flight REQUEST so closing the
                 // socket does not reset the connection underneath the worker.
                 ::shutdown(worker.connection.fd(),SHUT_WR);
