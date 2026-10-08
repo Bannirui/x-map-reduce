@@ -31,6 +31,9 @@
 #include<sys/socket.h>
 #include<unistd.h>
 
+#include<arpa/inet.h>
+#include<netinet/in.h>
+
 namespace {
     // master判定worker心跳超时的阈值
     constexpr std::chrono::seconds kHeartbeatTimeout{6};
@@ -55,6 +58,8 @@ namespace {
         xmr::net::EventLoop* coordinatorLoop = nullptr;
         Coordinator* owner = nullptr;
         ConnId id = 0;
+        // control连接的peer地址 用来给worker拼数据面地址
+        std::string host;
         // coordinator线程写 用于回填派发时的请求id
         std::string workerId;
         std::uint32_t lastRequest = 0;
@@ -78,13 +83,28 @@ namespace {
                 static_cast<std::uint16_t>(std::stoul(endpoint.substr(colon + 1)))};
     }
 
+    // 取一个已连接socket的对端IP
+    std::string peerHost(int fd) {
+        sockaddr_storage address{};
+        socklen_t length = sizeof(address);
+        if (::getpeername(fd, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+            return {};
+        }
+        char buffer[INET6_ADDRSTRLEN] = {0};
+        if (address.ss_family == AF_INET) {
+            ::inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&address)->sin_addr, buffer, sizeof(buffer));
+        } else if (address.ss_family == AF_INET6) {
+            ::inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&address)->sin6_addr, buffer, sizeof(buffer));
+        }
+        return buffer;
+    }
+
     // 一次提交进来的一次job运行的全部状态
     struct JobState {
         JobState(std::string job, std::vector<std::string> inputs, std::size_t reducers,
                  std::vector<std::string> inputData, std::size_t expectedWorkers, std::string output, ConnId client)
             : scheduler(std::move(job), inputs, reducers),
               inputData(std::move(inputData)),
-              mapOutput(inputs.size(), std::vector<std::string>(reducers)),
               expectedWorkers(expectedWorkers),
               output(std::move(output)),
               client(client) {
@@ -92,7 +112,6 @@ namespace {
 
         xmr::Scheduler scheduler;
         std::vector<std::string> inputData;
-        std::vector<std::vector<std::string> > mapOutput;
         std::vector<KeyValue> merged;
         std::size_t expectedWorkers = 1;
         std::string output;
@@ -146,6 +165,9 @@ namespace {
 
         void dispatch();
 
+        // 拼reduce任务要用的拉取计划 mapTask,host,port
+        std::vector<std::string> fetchPlan() const;
+
         void send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId,
                   const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
 
@@ -166,6 +188,10 @@ namespace {
         xmr::WorkerRegistry registry_;
         std::unordered_map<ConnId, std::shared_ptr<Conn> > conns_;
         std::unordered_map<std::string, ConnId> byWorker_;
+        // worker的数据面地址 host + port
+        std::unordered_map<std::string, std::pair<std::string, std::uint16_t> > workerData_;
+        // map任务的结果在哪个worker上
+        std::unordered_map<std::size_t, std::string> mapOwner_;
         std::unique_ptr<JobState> job_;
         std::atomic<bool> stopping_{false};
         std::string error_;
@@ -222,6 +248,7 @@ namespace {
 
         job_ = std::make_unique<JobState>(submit.job, submit.inputs, submit.reducers,
                                           std::move(inputData), submit.workers, submit.output, client);
+        mapOwner_.clear();
 
         xmr::protocol::SubmitAck ack;
         ack.statusCode = xmr::protocol::StatusCode::Ok;
@@ -292,6 +319,12 @@ namespace {
                     byWorker_[conn.workerId] = id;
                     break;
                 }
+                case xmr::protocol::MessageType::DataAddress: {
+                    // worker上报自己的数据面监听端口 供其它worker拉中间结果
+                    const auto address = xmr::protocol::DataAddress::decode(frame.body);
+                    workerData_[conn.workerId] = {conn.host, static_cast<std::uint16_t>(address.port)};
+                    break;
+                }
                 case xmr::protocol::MessageType::RequestTask: {
                     // worker告诉master它空闲了 没job也先记着 有job时好直接派
                     registry_.markIdle(conn.workerId);
@@ -306,6 +339,10 @@ namespace {
                     const auto held = registry_.taskOf(conn.workerId);
                     if (held && held->kind == xmr::taskKind(done.kind) && held->id == done.taskId) {
                         job_->scheduler.markDone(held->kind, held->id, held->attempt);
+                        if (held->kind == xmr::TaskKind::Map) {
+                            // 记下这个map的结果在哪个worker上 供reduce去拉
+                            mapOwner_[held->id] = conn.workerId;
+                        }
                     }
                     registry_.complete(conn.workerId);
                     break;
@@ -320,40 +357,6 @@ namespace {
                         job_->scheduler.markFailed(held->kind, held->id, fail.reason);
                     }
                     registry_.complete(conn.workerId);
-                    break;
-                }
-                case xmr::protocol::MessageType::MapOutput: {
-                    if (!job_) {
-                        break;
-                    }
-                    // worker告诉master它完成了map任务 并把中间结果发送过来了
-                    const auto output = xmr::protocol::MapOutput::decode(frame.body);
-                    if (output.mapTask >= job_->mapOutput.size()
-                        || output.partition >= job_->mapOutput[output.mapTask].size()) {
-                        throw std::runtime_error("MAPOUT out of range");
-                    }
-                    const auto held = registry_.taskOf(conn.workerId);
-                    if (!held || held->kind != xmr::TaskKind::Map || held->id != output.mapTask) {
-                        break;
-                    }
-                    std::string& buffer = job_->mapOutput[output.mapTask][output.partition];
-                    if (output.offset != buffer.size()) {
-                        throw std::runtime_error("MAPOUT out of order");
-                    }
-                    buffer.append(output.payload.begin(), output.payload.end());
-                    break;
-                }
-                case xmr::protocol::MessageType::Fetch: {
-                    if (!job_) {
-                        break;
-                    }
-                    // worker准备执行reduce 跟master要reduce需要的kv
-                    const auto fetch = xmr::protocol::Fetch::decode(frame.body);
-                    if (fetch.mapTask >= job_->mapOutput.size()
-                        || fetch.partition >= job_->mapOutput[fetch.mapTask].size()) {
-                        throw std::runtime_error("FETCH out of range");
-                    }
-                    sendBlob(id, frame.header.requestId, job_->mapOutput[fetch.mapTask][fetch.partition]);
                     break;
                 }
                 case xmr::protocol::MessageType::InputRequest: {
@@ -408,6 +411,7 @@ namespace {
             requeueTask(conn->workerId);
             registry_.remove(conn->workerId);
             byWorker_.erase(conn->workerId);
+            workerData_.erase(conn->workerId);
         }
         conns_.erase(it);
         conn->loop->queueInLoop([conn] {
@@ -415,11 +419,27 @@ namespace {
         });
     }
 
+    std::vector<std::string> Coordinator::fetchPlan() const {
+        std::vector<std::string> locations;
+        for (std::size_t mapTask = 0; mapTask < job_->inputData.size(); ++mapTask) {
+            const auto owner = mapOwner_.find(mapTask);
+            if (owner == mapOwner_.end()) {
+                continue;
+            }
+            const auto address = workerData_.find(owner->second);
+            if (address == workerData_.end()) {
+                continue;
+            }
+            locations.push_back(std::to_string(mapTask) + "," + address->second.first
+                                + "," + std::to_string(address->second.second));
+        }
+        return locations;
+    }
+
     void Coordinator::dispatch() {
         if (byWorker_.size() < job_->expectedWorkers) {
             return;
-        }
-        while (registry_.hasIdle()) {
+        }        while (registry_.hasIdle()) {
             auto task = job_->scheduler.takeTask();
             if (!task) {
                 break;
@@ -437,7 +457,10 @@ namespace {
                 continue;
             }
             // master向worker派发任务
-            const auto message = xmr::toTaskMessage(*task);
+            auto message = xmr::toTaskMessage(*task);
+            if (task->kind == xmr::TaskKind::Reduce) {
+                message.locations = fetchPlan();
+            }
             send(byName->second, xmr::protocol::MessageType::Task, it->second->lastRequest, message.encode());
         }
     }
@@ -490,12 +513,6 @@ namespace {
     void Coordinator::retryOrFail(const xmr::Task& task) {
         if (!job_) {
             return;
-        }
-        // map任务重发前清掉上一次尝试可能残留的半截中间结果
-        if (task.kind == xmr::TaskKind::Map && task.id < job_->mapOutput.size()) {
-            for (std::string& part : job_->mapOutput[task.id]) {
-                part.clear();
-            }
         }
         if (!job_->scheduler.retry(task)) {
             job_->scheduler.markFailed(task.kind, task.id, "attempts exhausted");
@@ -628,6 +645,7 @@ int main(int argc, char** argv) {
                     xmr::net::setNonBlocking(connection.fd());
                     auto conn = std::make_shared<Conn>();
                     conn->connection = std::move(connection);
+                    conn->host = peerHost(conn->connection.fd());
                     conn->id = nextConnId.fetch_add(1);
                     conn->owner = &coordinator;
                     conn->coordinatorLoop = &coordinatorLoop;

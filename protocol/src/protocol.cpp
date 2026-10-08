@@ -189,12 +189,14 @@ namespace xmr::protocol {
             case MessageType::Submit: return "SUBMIT";
             case MessageType::SubmitAck: return "SUBMIT_ACK";
             case MessageType::SubmitResult: return "SUBMIT_RESULT";
+            case MessageType::Pull: return "PULL";
+            case MessageType::DataAddress: return "DATA_ADDRESS";
         }
         return "UNKNOWN";
     }
 
     std::optional<MessageType> parseMessageType(std::string_view name) {
-        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::SubmitResult); ++raw) {
+        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::DataAddress); ++raw) {
             const auto type = static_cast<MessageType>(raw);
             if (messageTypeName(type) == name) {
                 return type;

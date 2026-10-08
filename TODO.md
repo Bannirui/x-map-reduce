@@ -45,6 +45,13 @@ TODO
     - versioned `extern "C"` map/reduce interface
     - worker loads `job.so` with `dlopen`
   - [ ] V6.1 用户提交任务给master master负责下发动态库给worker
+    - [X] 前置：控制面/数据面拆分(master只管元数据)
+      - [X] 定位：master只做元数据与调度(提交、注册、心跳、派任务)，shuffle等大数据不再走master
+      - [X] 控制面：client<->master、worker<->master的小消息(Submit/Hello/Ping/Task/Done/Fail)
+      - [X] 数据面：worker<->worker直连传map中间结果(reduce直接去map worker拉对应分区)，master只下发 去哪个worker拉哪个分区的元数据
+      - [X] worker开自己的数据listener供其它worker拉数据，注册时把端口报给master
+      - [X] map结果只留在map worker本地，master只记mapTask -> worker
+      - [ ] 缺口：map worker在reduce拉取前死掉会导致中间结果丢失(需要重新执行已完成map)
     - [ ] 前置：常驻化 master/worker(while 循环服务，不再一个 job 就退出)
       - [X] worker: `Stop`=本job结束并复位状态(epoch防串)、`Shutdown`=退出；保持连接与心跳
       - [X] master: server启动一次、每job一份coordinator生命周期(等提交->跑->回复->复位)
@@ -55,7 +62,7 @@ TODO
     - [ ] Plugin/PluginAck 消息；worker收齐插件后落盘缓存+dlopen，再派任务
   - [ ] V6.2 任务提交支持跨语言 这个要针对不同语言开发sdk 难度太大
 - [ ] V7 HA cluster master
-  - [ ] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)
+  - [X] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)
   - [ ] V7.1 persistent cluster master that accepts jobs; the per-job coordinator becomes a restartable driver
   - [ ] V7.2 leader election via an external consensus store (ZooKeeper/etcd/Consul)
 - [X] V8 epoll+reactor

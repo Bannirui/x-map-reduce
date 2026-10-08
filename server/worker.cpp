@@ -35,8 +35,14 @@ namespace {
         RequestTask,
         WaitingTask,
         WaitingInput,
-        WaitingFetch,
         Computing,
+    };
+
+    // reduce要去哪个worker拉哪个map任务的分区
+    struct Location {
+        std::size_t mapTask = 0;
+        std::string host;
+        std::uint16_t port = 0;
     };
 
     std::vector<std::uint8_t> toBytes(const std::string& text) {
@@ -53,6 +59,93 @@ namespace {
 
     void usage(const char* program) {
         std::cerr << "Usage: " << program << " --master <host:port> [--plugin <path>]...\n";
+    }
+
+    // 从另一个worker拉某个map任务的分区结果 阻塞调用 只在线程池里跑
+    std::vector<KeyValue> pullPartition(const std::string& host, std::uint16_t port,
+                                        std::size_t mapTask, std::size_t partition) {
+        xmr::net::Connection connection = xmr::net::connectTo(host, port);
+        xmr::protocol::Pull pull;
+        pull.mapTask = mapTask;
+        pull.partition = partition;
+        const auto request = xmr::protocol::makeFrame(xmr::protocol::MessageType::Pull, 1, pull.encode());
+        xmr::net::sendAll(connection.fd(), request.data(), request.size());
+
+        xmr::net::ByteBuffer in;
+        std::string blob;
+        while (true) {
+            if (xmr::net::recvInto(connection.fd(), in) == xmr::net::IoStatus::Closed) {
+                throw std::runtime_error("pull peer closed");
+            }
+            xmr::protocol::FrameDecoder decoder(in);
+            while (auto frame = decoder.next()) {
+                if (frame->header.type != xmr::protocol::MessageType::Data) {
+                    continue;
+                }
+                const auto data = xmr::protocol::DataMessage::decode(frame->body);
+                blob.append(data.payload.begin(), data.payload.end());
+                if ((frame->header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) == 0) {
+                    return xmr::deserializeKeyValues(blob);
+                }
+            }
+        }
+    }
+
+    // 响应另一个worker的拉取请求 阻塞调用 只在线程池里跑
+    void servePull(xmr::net::Connection connection,
+                   std::unordered_map<std::size_t, std::vector<std::string> >& store,
+                   std::mutex& storeMutex) {
+        xmr::net::ByteBuffer in;
+        while (true) {
+            if (xmr::net::recvInto(connection.fd(), in) == xmr::net::IoStatus::Closed) {
+                return;
+            }
+            xmr::protocol::FrameDecoder decoder(in);
+            while (auto frame = decoder.next()) {
+                if (frame->header.type != xmr::protocol::MessageType::Pull) {
+                    continue;
+                }
+                const auto request = xmr::protocol::Pull::decode(frame->body);
+                std::string blob;
+                {
+                    std::lock_guard<std::mutex> lock(storeMutex);
+                    const auto it = store.find(request.mapTask);
+                    if (it != store.end() && request.partition < it->second.size()) {
+                        blob = it->second[request.partition];
+                    }
+                }
+                std::size_t offset = 0;
+                do {
+                    const std::size_t n = std::min<std::size_t>(xmr::protocol::kChunkBytes, blob.size() - offset);
+                    xmr::protocol::DataMessage data;
+                    data.offset = offset;
+                    data.total = blob.size();
+                    data.payload.assign(blob.begin() + static_cast<std::ptrdiff_t>(offset),
+                                        blob.begin() + static_cast<std::ptrdiff_t>(offset + n));
+                    const bool more = offset + n < blob.size();
+                    const auto out = xmr::protocol::makeFrame(
+                        xmr::protocol::MessageType::Data, frame->header.requestId, data.encode(),
+                        more ? static_cast<std::uint16_t>(xmr::protocol::Flag::More) : 0);
+                    xmr::net::sendAll(connection.fd(), out.data(), out.size());
+                    offset += n;
+                } while (offset < blob.size());
+                return;
+            }
+        }
+    }
+
+    // "mapTask,host,port" -> Location
+    Location parseLocation(const std::string& text) {
+        Location location;
+        const auto first = text.find(',');
+        const auto second = text.find(',', first == std::string::npos ? 0 : first + 1);
+        if (first == std::string::npos || second == std::string::npos) {
+            throw std::runtime_error("bad location '" + text + "'");
+        }
+        location.mapTask = static_cast<std::size_t>(std::stoull(text.substr(0, first)));
+        location.host = text.substr(first + 1, second - first - 1);
+        location.port = static_cast<std::uint16_t>(std::stoul(text.substr(second + 1)));
+        return location;
     }
 } // namespace
 
@@ -85,8 +178,13 @@ int main(int argc, char** argv) {
         xmr::net::Connection connection = xmr::net::connectTo(host, port);
         xmr::net::setNonBlocking(connection.fd());
 
+        // 数据面监听 给别的worker来拉中间结果
+        xmr::net::Listener dataListener("0.0.0.0", 0);
+        xmr::net::setNonBlocking(dataListener.fd());
+
         xmr::net::Poller poller;
         poller.add(connection.fd(), xmr::net::kReadable);
+        poller.add(dataListener.fd(), xmr::net::kReadable);
         xmr::net::ByteBuffer in;
         xmr::net::ByteBuffer out;
 
@@ -95,16 +193,15 @@ int main(int argc, char** argv) {
         poller.add(notifier.fd(), xmr::net::kReadable);
         std::mutex completionMutex;
         std::vector<std::function<void()> > completions;
+        // 本worker产出的中间结果 mapTask -> 每个分区的序列化blob 供别的worker拉
+        std::unordered_map<std::size_t, std::vector<std::string> > mapStore;
+        std::mutex mapStoreMutex;
         xmr::net::ThreadPool pool(kComputeThreads);
 
         std::uint32_t requestId = 0;
         Stage stage = Stage::RequestTask;
         std::optional<xmr::Task> current;
-        std::vector<std::vector<KeyValue> > fetched;
-        std::unordered_map<std::uint32_t, std::size_t> fetchIndex;
-        // 分块DATA的接收缓冲 按requestId聚合
         std::unordered_map<std::uint32_t, std::string> incoming;
-        std::size_t outstanding = 0;
         bool running = true;
         // job代号 换job后自增 用来丢弃上一个job迟到的计算结果
         std::uint64_t epoch = 0;
@@ -113,10 +210,11 @@ int main(int argc, char** argv) {
         auto resetJob = [&] {
             ++epoch;
             current.reset();
-            fetched.clear();
-            fetchIndex.clear();
             incoming.clear();
-            outstanding = 0;
+            {
+                std::lock_guard<std::mutex> lock(mapStoreMutex);
+                mapStore.clear();
+            }
             stage = Stage::RequestTask;
         };
 
@@ -179,28 +277,6 @@ int main(int argc, char** argv) {
             sendFrame(xmr::protocol::MessageType::Ping, 0, ping.encode());
         });
 
-        auto sendMapOutput = [&](const xmr::Task& task, const std::vector<std::vector<KeyValue> >& parts) {
-            // map产出的中间结果 已经按照R分区好了 现在还放在worker的内存上 等着shuffle
-            for (std::size_t r = 0; r < parts.size(); ++r) {
-                // todo 论文里面master只负责管理元数据 业务数据是不管的 我们的架构里面先让master负责shuffle 把所有的中间结果网络发给master
-                const std::string blob = xmr::serializeKeyValues(parts[r]);
-                std::size_t offset = 0;
-                do {
-                    const std::size_t n = std::min<std::size_t>(xmr::protocol::kChunkBytes, blob.size() - offset);
-                    xmr::protocol::MapOutput output;
-                    output.mapTask = task.id;
-                    output.partition = r;
-                    output.offset = offset;
-                    output.payload.assign(blob.begin() + static_cast<std::ptrdiff_t>(offset),
-                                          blob.begin() + static_cast<std::ptrdiff_t>(offset + n));
-                    const bool more = offset + n < blob.size();
-                    sendFrame(xmr::protocol::MessageType::MapOutput, 0, output.encode(),
-                              more ? static_cast<std::uint16_t>(xmr::protocol::Flag::More) : 0);
-                    offset += n;
-                } while (offset < blob.size());
-            }
-        };
-
         auto sendResult = [&](const xmr::Task& task, const std::vector<KeyValue>& result) {
             xmr::protocol::ResultMessage message;
             message.reduceTask = task.id;
@@ -225,6 +301,81 @@ int main(int argc, char** argv) {
             sendFrame(xmr::protocol::MessageType::Done, 0, done.encode());
         };
 
+        // 收到map任务输入后 在线程池里跑map 结果留在本地并上报Done
+        auto startMap = [&](const xmr::Task& task, std::string content) {
+            const std::uint64_t job = epoch;
+            pool.submit([&, task, content = std::move(content), job] {
+                std::vector<std::vector<KeyValue> > parts;
+                try {
+                    parts = xmr::runMapTask(task, content);
+                } catch (const std::exception& error) {
+                    const std::string reason = error.what();
+                    post([&, task, reason, job] {
+                        if (job != epoch) {
+                            return;
+                        }
+                        failTask(task, reason);
+                        stage = Stage::RequestTask;
+                    });
+                    return;
+                }
+                post([&, task, parts = std::move(parts), job]() mutable {
+                    if (job != epoch) {
+                        return;
+                    }
+                    // 中间结果留在本地 等reduce的worker来拉
+                    {
+                        std::lock_guard<std::mutex> lock(mapStoreMutex);
+                        std::vector<std::string>& stored = mapStore[task.id];
+                        stored.clear();
+                        stored.reserve(parts.size());
+                        for (auto& part : parts) {
+                            stored.push_back(xmr::serializeKeyValues(part));
+                        }
+                    }
+                    sendDone(task);
+                    stage = Stage::RequestTask;
+                });
+            });
+        };
+
+        // 收到reduce任务 在线程池里直接从各个map worker拉数据再reduce
+        auto startReduce = [&](const xmr::Task& task, std::vector<Location> locations) {
+            const std::uint64_t job = epoch;
+            pool.submit([&, task, locations = std::move(locations), job] {
+                std::vector<KeyValue> result;
+                try {
+                    std::vector<std::vector<KeyValue> > fetched(task.maps);
+                    for (const auto& location : locations) {
+                        fetched[location.mapTask] = pullPartition(location.host, location.port,
+                                                                  location.mapTask, task.id);
+                    }
+                    auto fetch = [&fetched](std::size_t mapTask, std::size_t) {
+                        return std::move(fetched[mapTask]);
+                    };
+                    result = xmr::runReduceTask(task, fetch);
+                } catch (const std::exception& error) {
+                    const std::string reason = error.what();
+                    post([&, task, reason, job] {
+                        if (job != epoch) {
+                            return;
+                        }
+                        failTask(task, reason);
+                        stage = Stage::RequestTask;
+                    });
+                    return;
+                }
+                post([&, task, result = std::move(result), job]() mutable {
+                    if (job != epoch) {
+                        return;
+                    }
+                    sendResult(task, result);
+                    sendDone(task);
+                    stage = Stage::RequestTask;
+                });
+            });
+        };
+
         auto handleFrame = [&](const xmr::protocol::Frame& frame) {
             if (frame.header.type == xmr::protocol::MessageType::Stop) {
                 // master告诉worker本job结束了 复位状态准备接下一个job
@@ -242,7 +393,8 @@ int main(int argc, char** argv) {
             }
             if (frame.header.type == xmr::protocol::MessageType::Task) {
                 // worker收到master派发的任务
-                current = xmr::toTask(xmr::protocol::TaskMessage::decode(frame.body));
+                const auto message = xmr::protocol::TaskMessage::decode(frame.body);
+                current = xmr::toTask(message);
                 if (current->kind == xmr::TaskKind::Map) {
                     // worker收到master派发的map任务 跟master要这个map任务的数据
                     xmr::protocol::InputRequest request;
@@ -250,20 +402,16 @@ int main(int argc, char** argv) {
                     sendFrame(xmr::protocol::MessageType::InputRequest, ++requestId, request.encode());
                     stage = Stage::WaitingInput;
                 } else {
-                    // worker收到master派发的reduce任务
-                    fetched.assign(current->maps, std::vector<KeyValue>{});
-                    fetchIndex.clear();
-                    outstanding = current->maps;
-                    for (std::size_t mapTask = 0; mapTask < current->maps; ++mapTask) {
-                        xmr::protocol::Fetch request;
-                        request.mapTask = mapTask;
-                        request.partition = current->id;
-                        request.offset = 0;
-                        const std::uint32_t rid = ++requestId;
-                        fetchIndex[rid] = mapTask;
-                        sendFrame(xmr::protocol::MessageType::Fetch, rid, request.encode());
+                    // worker收到master派发的reduce任务 附带"去哪些worker拉"的计划
+                    std::vector<Location> locations;
+                    locations.reserve(message.locations.size());
+                    for (const auto& text : message.locations) {
+                        locations.push_back(parseLocation(text));
                     }
-                    stage = Stage::WaitingFetch;
+                    const xmr::Task task = *current;
+                    current.reset();
+                    stage = Stage::Computing;
+                    startReduce(task, std::move(locations));
                 }
                 return;
             }
@@ -277,84 +425,16 @@ int main(int argc, char** argv) {
                 if ((frame.header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) != 0) {
                     return;
                 }
-                const std::string payload = std::move(buffer);
+                std::string payload = std::move(buffer);
                 incoming.erase(frame.header.requestId);
-                if (stage == Stage::WaitingInput) {
-                    // worker收到master给的map任务数据 计算丢到线程池 算完再回reactor发结果
-                    const xmr::Task task = *current;
-                    const std::uint64_t job = epoch;
-                    current.reset();
-                    stage = Stage::Computing;
-                    pool.submit([&, task, content = payload, job] {
-                        std::vector<std::vector<KeyValue> > parts;
-                        try {
-                            parts = xmr::runMapTask(task, content);
-                        } catch (const std::exception& error) {
-                            const std::string reason = error.what();
-                            post([&, task, reason, job] {
-                                if (job != epoch) {
-                                    return;
-                                }
-                                failTask(task, reason);
-                                stage = Stage::RequestTask;
-                            });
-                            return;
-                        }
-                        post([&, task, parts = std::move(parts), job]() mutable {
-                            if (job != epoch) {
-                                return;
-                            }
-                            sendMapOutput(task, parts);
-                            sendDone(task);
-                            stage = Stage::RequestTask;
-                        });
-                    });
-                    return;
+                if (stage != Stage::WaitingInput) {
+                    throw std::runtime_error("unexpected DATA reply");
                 }
-                if (stage == Stage::WaitingFetch) {
-                    const auto it = fetchIndex.find(frame.header.requestId);
-                    if (it == fetchIndex.end()) {
-                        throw std::runtime_error("unexpected DATA reply");
-                    }
-                    fetched[it->second] = xmr::deserializeKeyValues(payload);
-                    fetchIndex.erase(it);
-                    if (--outstanding == 0) {
-                        const xmr::Task task = *current;
-                        const std::uint64_t job = epoch;
-                        current.reset();
-                        stage = Stage::Computing;
-                        std::vector<std::vector<KeyValue> > data = std::move(fetched);
-                        pool.submit([&, task, data = std::move(data), job] {
-                            std::vector<KeyValue> result;
-                            try {
-                                auto fetch = [&data](std::size_t mapTask, std::size_t) {
-                                    return std::move(data[mapTask]);
-                                };
-                                result = xmr::runReduceTask(task, fetch);
-                            } catch (const std::exception& error) {
-                                const std::string reason = error.what();
-                                post([&, task, reason, job] {
-                                    if (job != epoch) {
-                                        return;
-                                    }
-                                    failTask(task, reason);
-                                    stage = Stage::RequestTask;
-                                });
-                                return;
-                            }
-                            post([&, task, result = std::move(result), job]() mutable {
-                                if (job != epoch) {
-                                    return;
-                                }
-                                sendResult(task, result);
-                                sendDone(task);
-                                stage = Stage::RequestTask;
-                            });
-                        });
-                    }
-                    return;
-                }
-                throw std::runtime_error("unexpected DATA reply");
+                const xmr::Task task = *current;
+                current.reset();
+                stage = Stage::Computing;
+                startMap(task, std::move(payload));
+                return;
             }
             throw std::runtime_error("unexpected master message");
         };
@@ -365,6 +445,11 @@ int main(int argc, char** argv) {
         hello.pid = static_cast<std::uint64_t>(::getpid());
         out.append(xmr::protocol::makeFrame(xmr::protocol::MessageType::Hello, 0, hello.encode()));
         flush();
+
+        // 上报数据面监听端口
+        xmr::protocol::DataAddress dataAddress;
+        dataAddress.port = dataListener.port();
+        sendFrame(xmr::protocol::MessageType::DataAddress, 0, dataAddress.encode());
 
         while (running) {
             if (stage == Stage::RequestTask) {
@@ -377,6 +462,23 @@ int main(int argc, char** argv) {
                 if (event.fd == notifier.fd()) {
                     notifier.drain();
                     runCompletions();
+                    continue;
+                }
+                if (event.fd == dataListener.fd()) {
+                    while (true) {
+                        xmr::net::Connection incomingConn;
+                        const xmr::net::IoStatus status = dataListener.acceptNonBlocking(incomingConn);
+                        if (status == xmr::net::IoStatus::WouldBlock) {
+                            break;
+                        }
+                        if (status != xmr::net::IoStatus::Ok) {
+                            throw std::runtime_error("data accept failed");
+                        }
+                        auto conn = std::make_shared<xmr::net::Connection>(std::move(incomingConn));
+                        pool.submit([&, conn] {
+                            servePull(std::move(*conn), mapStore, mapStoreMutex);
+                        });
+                    }
                     continue;
                 }
                 if (event.events & xmr::net::kWritable) {

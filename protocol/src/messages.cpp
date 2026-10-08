@@ -122,6 +122,9 @@ namespace xmr::protocol {
         if (input) {
             writer.putString(taskMsg::kInput, *input);
         }
+        for (const auto& location : locations) {
+            writer.putString(taskMsg::kLocation, location);
+        }
         return writer.take();
     }
 
@@ -153,6 +156,9 @@ namespace xmr::protocol {
                     break;
                 case taskMsg::kInput:
                     message.input = reader.asString();
+                    break;
+                case taskMsg::kLocation:
+                    message.locations.push_back(reader.asString());
                     break;
                 default:
                     break;
@@ -548,6 +554,48 @@ namespace xmr::protocol {
                     break;
                 default:
                     break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> Pull::encode() const {
+        FieldWriter writer;
+        writer.putU64(pull::kMapTask, mapTask);
+        writer.putU64(pull::kPartition, partition);
+        return writer.take();
+    }
+
+    Pull Pull::decode(const std::vector<std::uint8_t>& body) {
+        Pull message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case pull::kMapTask:
+                    message.mapTask = reader.asU64();
+                    break;
+                case pull::kPartition:
+                    message.partition = reader.asU64();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> DataAddress::encode() const {
+        FieldWriter writer;
+        writer.putU64(dataAddress::kPort, port);
+        return writer.take();
+    }
+
+    DataAddress DataAddress::decode(const std::vector<std::uint8_t>& body) {
+        DataAddress message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            if (reader.id() == dataAddress::kPort) {
+                message.port = reader.asU64();
             }
         }
         return message;

@@ -53,6 +53,8 @@ namespace xmr::protocol {
         std::uint64_t reducers = 1;
         std::uint64_t maps = 0;
         std::optional<std::string> input;
+        // reduce任务要去哪些worker拉中间结果 每个是"mapTask,host,port"
+        std::vector<std::string> locations;
 
         std::vector<std::uint8_t> encode() const;
 
@@ -187,5 +189,24 @@ namespace xmr::protocol {
         std::vector<std::uint8_t> encode() const;
 
         static SubmitResult decode(const std::vector<std::uint8_t>& body);
+    };
+
+    // worker之间拉中间结果 请求某个map任务的某个分区
+    struct Pull {
+        std::uint64_t mapTask = 0;
+        std::uint64_t partition = 0;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static Pull decode(const std::vector<std::uint8_t>& body);
+    };
+
+    // worker把自己的数据面监听端口报给master
+    struct DataAddress {
+        std::uint64_t port = 0;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static DataAddress decode(const std::vector<std::uint8_t>& body);
     };
 } // namespace xmr::protocol

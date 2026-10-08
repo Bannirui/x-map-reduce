@@ -40,6 +40,8 @@ namespace xmr::protocol {
         Submit = 16,
         SubmitAck = 17,
         SubmitResult = 18,
+        Pull = 19,
+        DataAddress = 20,
     };
 
     enum class WireType : std::uint8_t {
@@ -217,6 +219,8 @@ namespace xmr::protocol {
         inline constexpr std::uint16_t kReducers = 4;
         inline constexpr std::uint16_t kMaps = 5;
         inline constexpr std::uint16_t kInput = 6;
+        // 重复字段 每个是"mapTask,host,port" reduce去这些worker拉中间结果
+        inline constexpr std::uint16_t kLocation = 7;
     } // namespace taskMsg
 
     namespace inputRequest {
@@ -286,4 +290,13 @@ namespace xmr::protocol {
         inline constexpr std::uint16_t kOutput = 2;
         inline constexpr std::uint16_t kReason = 3;
     } // namespace submitResult
+
+    namespace pull {
+        inline constexpr std::uint16_t kMapTask = 1;
+        inline constexpr std::uint16_t kPartition = 2;
+    } // namespace pull
+
+    namespace dataAddress {
+        inline constexpr std::uint16_t kPort = 1;
+    } // namespace dataAddress
 } // namespace xmr::protocol
