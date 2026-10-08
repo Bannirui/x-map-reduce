@@ -63,8 +63,8 @@ TODO
     - use `flags.More` + `offset` so `Data`/`MapOutput` are chunked
     - drop the single 64MB frame ceiling
   - [ ] V8.8 move map/reduce compute off the event loop / multi-reactor (boss/work group, refer to Netty)
-    - business work on a thread pool (Netty-style)
-    - boss/acceptor + worker reactors
+    - [X] worker用线程池把map/reduce移出reactor
+    - [ ] boss/acceptor+worker reactors
 - [ ] 文件系统 模拟入口的大数据量文件 耦合or外部实现
 - [ ] master角色任务过重 拆分问题
   - [X] worker管理

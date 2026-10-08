@@ -1,5 +1,7 @@
 #include"net/event_loop.h"
 #include"net/net.h"
+#include"net/notifier.h"
+#include"net/thread_pool.h"
 #include"net/timer.h"
 #include"protocol/framing.h"
 #include"protocol/messages.h"
@@ -10,7 +12,9 @@
 
 #include<chrono>
 #include<cstdint>
+#include<functional>
 #include<iostream>
+#include<mutex>
 #include<optional>
 #include<stdexcept>
 #include<string>
@@ -23,12 +27,15 @@
 namespace {
     // worker上报心跳的周期
     constexpr std::chrono::seconds kHeartbeatInterval{2};
+    // 业务计算的线程池大小
+    constexpr std::size_t kComputeThreads{4};
 
     enum class Stage {
         RequestTask,
         WaitingTask,
         WaitingInput,
         WaitingFetch,
+        Computing,
     };
 
     std::vector<std::uint8_t> toBytes(const std::string& text) {
@@ -86,6 +93,13 @@ int main(int argc, char** argv) {
         xmr::net::ByteBuffer in;
         xmr::net::ByteBuffer out;
 
+        // 业务计算跑在线程池里 算完通过notifier把回调投递回reactor线程执行
+        xmr::net::Notifier notifier;
+        poller.add(notifier.fd(), xmr::net::kReadable);
+        std::mutex completionMutex;
+        std::vector<std::function<void()> > completions;
+        xmr::net::ThreadPool pool(kComputeThreads);
+
         std::uint32_t requestId = 0;
         Stage stage = Stage::RequestTask;
         std::optional<xmr::Task> current;
@@ -93,6 +107,26 @@ int main(int argc, char** argv) {
         std::unordered_map<std::uint32_t, std::size_t> fetchIndex;
         std::size_t outstanding = 0;
         bool stopped = false;
+
+        // 任意线程都可以投递 只有reactor线程会执行
+        auto post = [&](std::function<void()> completion) {
+            {
+                std::lock_guard<std::mutex> lock(completionMutex);
+                completions.push_back(std::move(completion));
+            }
+            notifier.notify();
+        };
+
+        auto runCompletions = [&] {
+            std::vector<std::function<void()> > ready;
+            {
+                std::lock_guard<std::mutex> lock(completionMutex);
+                ready.swap(completions);
+            }
+            for (auto& completion : ready) {
+                completion();
+            }
+        };
 
         auto updateInterest = [&] {
             std::uint32_t events = xmr::net::kReadable;
@@ -133,9 +167,8 @@ int main(int argc, char** argv) {
             sendFrame(xmr::protocol::MessageType::Ping, 0, ping.encode());
         });
 
-        auto finishMap = [&](const xmr::Task& task, const std::string& content) {
+        auto sendMapOutput = [&](const xmr::Task& task, const std::vector<std::vector<KeyValue> >& parts) {
             // map产出的中间结果 已经按照R分区好了 现在还放在worker的内存上 等着shuffle
-            const auto parts = xmr::runMapTask(task, content);
             for (std::size_t r = 0; r < parts.size(); ++r) {
                 // todo 论文里面master只负责管理元数据 业务数据是不管的 我们的架构里面先让master负责shuffle 把所有的中间结果网络发给master
                 xmr::protocol::MapOutput output;
@@ -147,11 +180,7 @@ int main(int argc, char** argv) {
             }
         };
 
-        auto finishReduce = [&](const xmr::Task& task) {
-            auto fetch = [&](std::size_t mapTask, std::size_t) {
-                return std::move(fetched[mapTask]);
-            };
-            const auto result = xmr::runReduceTask(task, fetch);
+        auto sendResult = [&](const xmr::Task& task, const std::vector<KeyValue>& result) {
             xmr::protocol::ResultMessage message;
             message.reduceTask = task.id;
             message.offset = 0;
@@ -166,6 +195,13 @@ int main(int argc, char** argv) {
             fail.statusCode = xmr::protocol::StatusCode::Internal;
             fail.reason = reason;
             sendFrame(xmr::protocol::MessageType::Fail, 0, fail.encode());
+        };
+
+        auto sendDone = [&](const xmr::Task& task) {
+            xmr::protocol::Done done;
+            done.kind = xmr::wireKind(task.kind);
+            done.taskId = task.id;
+            sendFrame(xmr::protocol::MessageType::Done, 0, done.encode());
         };
 
         auto handleFrame = [&](const xmr::protocol::Frame& frame) {
@@ -208,18 +244,28 @@ int main(int argc, char** argv) {
             if (frame.header.type == xmr::protocol::MessageType::Data) {
                 const std::string payload = toString(xmr::protocol::DataMessage::decode(frame.body).payload);
                 if (stage == Stage::WaitingInput) {
-                    // worker收到master给的map任务数据
-                    try {
-                        finishMap(*current, payload);
-                        xmr::protocol::Done done;
-                        done.kind = xmr::protocol::WorkKind::Map;
-                        done.taskId = current->id;
-                        sendFrame(xmr::protocol::MessageType::Done, 0, done.encode());
-                    } catch (const std::exception& error) {
-                        failTask(*current, error.what());
-                    }
+                    // worker收到master给的map任务数据 计算丢到线程池 算完再回reactor发结果
+                    const xmr::Task task = *current;
                     current.reset();
-                    stage = Stage::RequestTask;
+                    stage = Stage::Computing;
+                    pool.submit([&, task, content = payload] {
+                        std::vector<std::vector<KeyValue> > parts;
+                        try {
+                            parts = xmr::runMapTask(task, content);
+                        } catch (const std::exception& error) {
+                            const std::string reason = error.what();
+                            post([&, task, reason] {
+                                failTask(task, reason);
+                                stage = Stage::RequestTask;
+                            });
+                            return;
+                        }
+                        post([&, task, parts = std::move(parts)]() mutable {
+                            sendMapOutput(task, parts);
+                            sendDone(task);
+                            stage = Stage::RequestTask;
+                        });
+                    });
                     return;
                 }
                 if (stage == Stage::WaitingFetch) {
@@ -230,17 +276,31 @@ int main(int argc, char** argv) {
                     fetched[it->second] = xmr::deserializeKeyValues(payload);
                     fetchIndex.erase(it);
                     if (--outstanding == 0) {
-                        try {
-                            finishReduce(*current);
-                            xmr::protocol::Done done;
-                            done.kind = xmr::protocol::WorkKind::Reduce;
-                            done.taskId = current->id;
-                            sendFrame(xmr::protocol::MessageType::Done, 0, done.encode());
-                        } catch (const std::exception& error) {
-                            failTask(*current, error.what());
-                        }
+                        const xmr::Task task = *current;
                         current.reset();
-                        stage = Stage::RequestTask;
+                        stage = Stage::Computing;
+                        std::vector<std::vector<KeyValue> > data = std::move(fetched);
+                        pool.submit([&, task, data = std::move(data)] {
+                            std::vector<KeyValue> result;
+                            try {
+                                auto fetch = [&data](std::size_t mapTask, std::size_t) {
+                                    return std::move(data[mapTask]);
+                                };
+                                result = xmr::runReduceTask(task, fetch);
+                            } catch (const std::exception& error) {
+                                const std::string reason = error.what();
+                                post([&, task, reason] {
+                                    failTask(task, reason);
+                                    stage = Stage::RequestTask;
+                                });
+                                return;
+                            }
+                            post([&, task, result = std::move(result)]() mutable {
+                                sendResult(task, result);
+                                sendDone(task);
+                                stage = Stage::RequestTask;
+                            });
+                        });
                     }
                     return;
                 }
@@ -264,6 +324,11 @@ int main(int argc, char** argv) {
             }
 
             for (const auto& event : poller.wait(timers.timeoutMs())) {
+                if (event.fd == notifier.fd()) {
+                    notifier.drain();
+                    runCompletions();
+                    continue;
+                }
                 if (event.events & xmr::net::kWritable) {
                     flush();
                 }
