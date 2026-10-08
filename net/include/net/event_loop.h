@@ -5,6 +5,7 @@
 
 #include<atomic>
 #include<cstdint>
+#include<exception>
 #include<functional>
 #include<mutex>
 #include<queue>
@@ -82,6 +83,10 @@ namespace xmr::net {
 
         void wakeup();
 
+        std::exception_ptr error() const {
+            return error_;
+        }
+
     private:
         void doPending();
 
@@ -92,6 +97,7 @@ namespace xmr::net {
         std::mutex mutex_;
         std::queue<std::function<void()> > pending_;
         std::atomic<bool> stopping_{false};
-        std::thread::id threadId_;
+        std::atomic<std::thread::id> threadId_{};
+        std::exception_ptr error_;
     };
 } // namespace xmr::net

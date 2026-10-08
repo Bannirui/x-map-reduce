@@ -1,4 +1,5 @@
 #include"net/event_loop.h"
+#include"net/event_loop_group.h"
 #include"net/net.h"
 #include"protocol/framing.h"
 #include"protocol/messages.h"
@@ -11,14 +12,18 @@
 #include"runtime/worker_registry.h"
 
 #include<algorithm>
+#include<atomic>
 #include<chrono>
 #include<cstdint>
+#include<exception>
 #include<fstream>
+#include<future>
 #include<iostream>
 #include<iterator>
 #include<memory>
 #include<stdexcept>
 #include<string>
+#include<thread>
 #include<unordered_map>
 #include<utility>
 #include<vector>
@@ -31,12 +36,35 @@ namespace {
     constexpr std::chrono::seconds kHeartbeatTimeout{6};
     // 单个任务执行超时的阈值 超了就重发
     constexpr std::chrono::seconds kTaskTimeout{30};
+    // coordinator检查超时/派发的周期
+    constexpr std::chrono::milliseconds kTick{20};
+    // worker reactor的线程数
+    constexpr std::size_t kIoThreads{4};
 
-    void usage(const char* program) {
-        std::cerr << "Usage: " << program
-            << " --job <name> [--plugin <path>]... [--reducers <R>] [--workers <N>]"
-            << " [--listen <host:port>] --output <file> <input...>\n";
-    }
+    using ConnId = std::uint64_t;
+
+    struct Conn;
+    class Coordinator;
+
+    // master和单个worker之间的连接 由某个worker reactor独占读写
+    struct Conn {
+        xmr::net::Connection connection;
+        xmr::net::ByteBuffer in;
+        xmr::net::ByteBuffer out;
+        xmr::net::EventLoop* loop = nullptr;
+        xmr::net::EventLoop* coordinatorLoop = nullptr;
+        Coordinator* owner = nullptr;
+        ConnId id = 0;
+        // coordinator线程写 用于回填派发时的请求id
+        std::string workerId;
+        std::uint32_t lastRequest = 0;
+        // worker reactor线程独占
+        bool broken = false;
+    };
+
+    void updateInterest(Conn& conn);
+
+    void flushConn(Conn& conn);
 
     /**
      * @param endpoint host:port格式
@@ -59,15 +87,368 @@ namespace {
         return std::string(bytes.begin(), bytes.end());
     }
 
-    struct Worker {
-        xmr::net::Connection connection;
-        xmr::net::ByteBuffer in;
-        xmr::net::ByteBuffer out;
-        std::string id;
-        std::uint32_t lastRequest = 0;
-        // 连接已损坏(断开或发送失败) 等事件处理完统一回收
-        bool broken = false;
+    // 业务协调者 独占任务调度和worker资源管理 只在自己的loop线程上跑
+    class Coordinator {
+    public:
+        Coordinator(std::string job, std::vector<std::string> inputs, std::size_t reducers,
+                    std::vector<std::string> inputData, std::size_t expectedWorkers)
+            : scheduler_(std::move(job), inputs, reducers),
+              inputData_(std::move(inputData)),
+              registry_(kHeartbeatTimeout, kTaskTimeout),
+              expectedWorkers_(expectedWorkers),
+              mapOutput_(inputs.size(), std::vector<std::string>(reducers)) {
+        }
+
+        void setLoop(xmr::net::EventLoop* loop) {
+            loop_ = loop;
+        }
+
+        void setOnDone(std::function<void()> onDone) {
+            onDone_ = std::move(onDone);
+        }
+
+        void start() {
+            loop_->addInterval(kTick, [this] { tick(); });
+        }
+
+        void onConnect(ConnId id, std::shared_ptr<Conn> conn) {
+            conns_[id] = std::move(conn);
+        }
+
+        void onFrame(ConnId id, const xmr::protocol::Frame& frame);
+
+        void onDisconnect(ConnId id);
+
+        bool failed() const {
+            return scheduler_.failed() || !error_.empty();
+        }
+
+        std::string error() const {
+            return error_.empty() ? scheduler_.error() : error_;
+        }
+
+        std::unordered_map<ConnId, std::shared_ptr<Conn> >& conns() {
+            return conns_;
+        }
+
+        std::vector<KeyValue>& merged() {
+            return merged_;
+        }
+
+    private:
+        void tick();
+
+        void dispatch();
+
+        void send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId,
+                  const std::vector<std::uint8_t>& body);
+
+        void requeueTask(const std::string& workerId);
+
+        void retryOrFail(const xmr::Task& task);
+
+        void finish();
+
+        void fail(std::string reason) {
+            error_ = std::move(reason);
+            finish();
+        }
+
+        xmr::net::EventLoop* loop_ = nullptr;
+        xmr::Scheduler scheduler_;
+        std::vector<std::string> inputData_;
+        xmr::WorkerRegistry registry_;
+        std::size_t expectedWorkers_;
+        std::unordered_map<ConnId, std::shared_ptr<Conn> > conns_;
+        std::unordered_map<std::string, ConnId> byWorker_;
+        std::vector<std::vector<std::string> > mapOutput_;
+        std::vector<KeyValue> merged_;
+        std::atomic<bool> done_{false};
+        std::string error_;
+        std::function<void()> onDone_;
     };
+
+    void Coordinator::tick() {
+        if (done_.load()) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const auto expired = registry_.poll(now);
+        for (const auto& workerId : expired.workers) {
+            requeueTask(workerId);
+        }
+        for (const auto& task : expired.tasks) {
+            retryOrFail(task);
+        }
+        dispatch();
+        if (scheduler_.finished() || scheduler_.failed()) {
+            finish();
+        }
+    }
+
+    void Coordinator::onFrame(ConnId id, const xmr::protocol::Frame& frame) {
+        const auto it = conns_.find(id);
+        if (it == conns_.end()) {
+            return;
+        }
+        Conn& conn = *it->second;
+        try {
+            // 源文本里面第一个字段是命令名
+            switch (frame.header.type) {
+                case xmr::protocol::MessageType::Hello: {
+                    // worker启动的时候给master发一下
+                    conn.workerId = xmr::protocol::Hello::decode(frame.body).workerId;
+                    registry_.add(conn.workerId, std::chrono::steady_clock::now());
+                    byWorker_[conn.workerId] = id;
+                    break;
+                }
+                case xmr::protocol::MessageType::RequestTask: {
+                    // worker告诉master它空闲了 希望master给它派任务
+                    registry_.markIdle(conn.workerId);
+                    conn.lastRequest = frame.header.requestId;
+                    break;
+                }
+                case xmr::protocol::MessageType::Done: {
+                    const auto done = xmr::protocol::Done::decode(frame.body);
+                    const auto held = registry_.taskOf(conn.workerId);
+                    if (held && held->kind == xmr::taskKind(done.kind) && held->id == done.taskId) {
+                        scheduler_.markDone(held->kind, held->id, held->attempt);
+                    }
+                    registry_.complete(conn.workerId);
+                    break;
+                }
+                case xmr::protocol::MessageType::Fail: {
+                    const auto fail = xmr::protocol::Fail::decode(frame.body);
+                    const auto held = registry_.taskOf(conn.workerId);
+                    if (held && held->kind == xmr::taskKind(fail.kind) && held->id == fail.taskId) {
+                        scheduler_.markFailed(held->kind, held->id, fail.reason);
+                    }
+                    registry_.complete(conn.workerId);
+                    break;
+                }
+                case xmr::protocol::MessageType::MapOutput: {
+                    // worker告诉master它完成了map任务 并把中间结果发送过来了
+                    const auto output = xmr::protocol::MapOutput::decode(frame.body);
+                    if (output.mapTask >= mapOutput_.size() || output.partition >= mapOutput_[output.mapTask].size()) {
+                        throw std::runtime_error("MAPOUT out of range");
+                    }
+                    const auto held = registry_.taskOf(conn.workerId);
+                    if (!held || held->kind != xmr::TaskKind::Map || held->id != output.mapTask) {
+                        break;
+                    }
+                    mapOutput_[output.mapTask][output.partition] = toString(output.payload);
+                    break;
+                }
+                case xmr::protocol::MessageType::Fetch: {
+                    // worker准备执行reduce 跟master要reduce需要的kv
+                    const auto fetch = xmr::protocol::Fetch::decode(frame.body);
+                    if (fetch.mapTask >= mapOutput_.size() || fetch.partition >= mapOutput_[fetch.mapTask].size()) {
+                        throw std::runtime_error("FETCH out of range");
+                    }
+                    const std::string& blob = mapOutput_[fetch.mapTask][fetch.partition];
+                    xmr::protocol::DataMessage data;
+                    data.offset = 0;
+                    data.total = blob.size();
+                    data.payload = toBytes(blob);
+                    send(id, xmr::protocol::MessageType::Data, frame.header.requestId, data.encode());
+                    break;
+                }
+                case xmr::protocol::MessageType::InputRequest: {
+                    // worker准备执行map函数了 跟master要map需要的文件数据
+                    const auto request = xmr::protocol::InputRequest::decode(frame.body);
+                    if (request.taskId >= inputData_.size()) {
+                        throw std::runtime_error("INPUT out of range");
+                    }
+                    const std::string& blob = inputData_[request.taskId];
+                    xmr::protocol::DataMessage data;
+                    data.offset = 0;
+                    data.total = blob.size();
+                    data.payload = toBytes(blob);
+                    send(id, xmr::protocol::MessageType::Data, frame.header.requestId, data.encode());
+                    break;
+                }
+                case xmr::protocol::MessageType::Result: {
+                    // worker窒息给你执行完了reduce 把最终结果给到了master
+                    const auto result = xmr::protocol::ResultMessage::decode(frame.body);
+                    auto pairs = xmr::deserializeKeyValues(toString(result.payload));
+                    merged_.insert(merged_.end(),
+                                   std::make_move_iterator(pairs.begin()), std::make_move_iterator(pairs.end()));
+                    break;
+                }
+                case xmr::protocol::MessageType::Ping: {
+                    // worker周期心跳 master回Pong
+                    const auto ping = xmr::protocol::Ping::decode(frame.body);
+                    xmr::protocol::Pong pong;
+                    pong.nonce = ping.nonce;
+                    send(id, xmr::protocol::MessageType::Pong, frame.header.requestId, pong.encode());
+                    break;
+                }
+                default:
+                    throw std::runtime_error("unexpected control message");
+            }
+            if (registry_.contains(conn.workerId)) {
+                registry_.touch(conn.workerId, std::chrono::steady_clock::now());
+            }
+        } catch (const std::exception& error) {
+            fail(error.what());
+        }
+    }
+
+    void Coordinator::onDisconnect(ConnId id) {
+        const auto it = conns_.find(id);
+        if (it == conns_.end()) {
+            return;
+        }
+        const std::shared_ptr<Conn> conn = it->second;
+        if (!conn->workerId.empty()) {
+            requeueTask(conn->workerId);
+            registry_.remove(conn->workerId);
+            byWorker_.erase(conn->workerId);
+        }
+        conns_.erase(it);
+        conn->loop->queueInLoop([conn] {
+            conn->loop->remove(conn->connection.fd());
+        });
+    }
+
+    void Coordinator::dispatch() {
+        if (byWorker_.size() < expectedWorkers_) {
+            return;
+        }
+        while (registry_.hasIdle()) {
+            auto task = scheduler_.takeTask();
+            if (!task) {
+                break;
+            }
+            const auto workerId = registry_.assignNext(*task, std::chrono::steady_clock::now());
+            if (!workerId) {
+                break;
+            }
+            const auto byName = byWorker_.find(*workerId);
+            if (byName == byWorker_.end()) {
+                continue;
+            }
+            const auto it = conns_.find(byName->second);
+            if (it == conns_.end()) {
+                continue;
+            }
+            // master向worker派发任务
+            const auto message = xmr::toTaskMessage(*task);
+            send(byName->second, xmr::protocol::MessageType::Task, it->second->lastRequest, message.encode());
+        }
+    }
+
+    void Coordinator::send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId,
+                           const std::vector<std::uint8_t>& body) {
+        const auto it = conns_.find(id);
+        if (it == conns_.end()) {
+            return;
+        }
+        const std::shared_ptr<Conn> conn = it->second;
+        const auto bytes = xmr::protocol::makeFrame(type, requestId, body);
+        conn->loop->queueInLoop([conn, bytes] {
+            conn->out.append(bytes);
+            flushConn(*conn);
+        });
+    }
+
+    // 回收worker持有的任务 重发
+    void Coordinator::requeueTask(const std::string& workerId) {
+        const auto task = registry_.reclaim(workerId);
+        if (task) {
+            retryOrFail(*task);
+        }
+    }
+
+    // 重发任务 次数用尽才判整个job失败
+    void Coordinator::retryOrFail(const xmr::Task& task) {
+        if (!scheduler_.retry(task)) {
+            scheduler_.markFailed(task.kind, task.id, "attempts exhausted");
+        }
+    }
+
+    void Coordinator::finish() {
+        if (!done_.exchange(true) && onDone_) {
+            onDone_();
+        }
+    }
+
+    // 由worker reactor线程调用 更新这个连接的读写关注事件
+    void updateInterest(Conn& conn) {
+        std::uint32_t events = xmr::net::kReadable;
+        if (!conn.out.empty()) {
+            events |= xmr::net::kWritable;
+        }
+        conn.loop->modify(conn.connection.fd(), events);
+    }
+
+    void flushConn(Conn& conn) {
+        if (conn.broken) {
+            return;
+        }
+        while (!conn.out.empty()) {
+            std::size_t sent = 0;
+            const xmr::net::IoStatus status = xmr::net::sendFrom(
+                conn.connection.fd(), conn.out.data(), conn.out.size(), sent);
+            if (status == xmr::net::IoStatus::Ok) {
+                conn.out.consume(sent);
+            } else if (status == xmr::net::IoStatus::WouldBlock) {
+                break;
+            } else {
+                conn.broken = true;
+                conn.coordinatorLoop->queueInLoop([owner = conn.owner, id = conn.id] {
+                    owner->onDisconnect(id);
+                });
+                return;
+            }
+        }
+        updateInterest(conn);
+    }
+
+    // 注册连接上的读写处理 由这个连接归属的worker reactor调用
+    void serveConn(std::shared_ptr<Conn> conn) {
+        conn->loop->add(conn->connection.fd(), xmr::net::kReadable,
+            [conn](std::uint32_t events) {
+                if (conn->broken) {
+                    return;
+                }
+                if (events & xmr::net::kWritable) {
+                    flushConn(*conn);
+                }
+                if (events & (xmr::net::kReadable | xmr::net::kBroken)) {
+                    bool closed = false;
+                    while (true) {
+                        const xmr::net::IoStatus status = xmr::net::recvInto(conn->connection.fd(), conn->in);
+                        if (status == xmr::net::IoStatus::Ok) {
+                            continue;
+                        }
+                        if (status == xmr::net::IoStatus::WouldBlock) {
+                            break;
+                        }
+                        closed = true;
+                        break;
+                    }
+                    xmr::protocol::FrameDecoder decoder(conn->in);
+                    while (auto frame = decoder.next()) {
+                        conn->coordinatorLoop->queueInLoop([conn, frame = *frame]() mutable {
+                            conn->owner->onFrame(conn->id, frame);
+                        });
+                    }
+                    if (closed) {
+                        conn->broken = true;
+                        conn->coordinatorLoop->queueInLoop([conn] {
+                            conn->owner->onDisconnect(conn->id);
+                        });
+                    }
+                }
+            });
+    }
+
+    void usage(const char* program) {
+        std::cerr << "Usage: " << program
+            << " --job <name> [--plugin <path>]... [--reducers <R>] [--workers <N>]"
+            << " [--listen <host:port>] --output <file> <input...>\n";
+    }
 } // namespace
 
 int main(int argc, char** argv) {
@@ -133,311 +514,96 @@ int main(int argc, char** argv) {
         xmr::net::setNonBlocking(listener.fd());
         std::cout << "LISTENING " << host << ":" << listener.port() << std::endl;
 
-        xmr::Scheduler scheduler(jobName, inputs, reducers);
-        // worker启动时候会连进来 master管理的worker节点
-        std::vector<std::unique_ptr<Worker> > workers;
-        std::unordered_map<int, Worker*> byFd;
+        Coordinator coordinator(jobName, inputs, reducers, std::move(inputData), expectedWorkers);
+        xmr::net::EventLoopGroup ioGroup(kIoThreads);
+        xmr::net::EventLoop coordinatorLoop;
+        xmr::net::EventLoop bossLoop;
+        std::atomic<ConnId> nextConnId{1};
 
-        xmr::net::Poller poller;
-        poller.add(listener.fd(), xmr::net::kReadable);
-        xmr::WorkerRegistry registry(kHeartbeatTimeout, kTaskTimeout);
-        std::unordered_map<std::string, Worker*> byId;
+        std::promise<void> donePromise;
+        std::future<void> doneFuture = donePromise.get_future();
+        coordinator.setOnDone([&donePromise] { donePromise.set_value(); });
+        coordinator.setLoop(&coordinatorLoop);
 
-        // M*R 每个map任务要对自己的输出进行R的分区
-        std::vector<std::vector<std::string> > mapOutput(inputs.size(), std::vector<std::string>(reducers));
-        std::vector<KeyValue> merged;
+        std::thread coordinatorThread([&] { coordinatorLoop.run(); });
+        ioGroup.start();
+        std::thread bossThread([&] { bossLoop.run(); });
 
-        auto updateInterest = [&](Worker& worker) {
-            std::uint32_t events = xmr::net::kReadable;
-            if (!worker.out.empty()) {
-                events |= xmr::net::kWritable;
-            }
-            poller.modify(worker.connection.fd(), events);
-        };
+        coordinatorLoop.runInLoop([&] { coordinator.start(); });
 
-        auto flush = [&](Worker& worker) {
-            while (!worker.out.empty()) {
-                std::size_t sent = 0;
-                const xmr::net::IoStatus status = xmr::net::sendFrom(
-                    worker.connection.fd(), worker.out.data(), worker.out.size(), sent);
-                if (status == xmr::net::IoStatus::Ok) {
-                    worker.out.consume(sent);
-                } else if (status == xmr::net::IoStatus::WouldBlock) {
-                    break;
-                } else {
-                    // 发送失败 标记为坏连接 由主循环统一回收重发
-                    worker.broken = true;
-                    return;
-                }
-            }
-            updateInterest(worker);
-        };
-
-        auto sendTo = [&](Worker& worker, xmr::protocol::MessageType type, std::uint32_t requestId,
-                          const std::vector<std::uint8_t>& body, std::uint16_t flags = 0) {
-            const auto frame = xmr::protocol::makeFrame(type, requestId, body, flags);
-            worker.out.append(frame);
-            flush(worker);
-        };
-
-        // master收worker发过来的消息
-        auto handleFrame = [&](Worker& worker, const xmr::protocol::Frame& frame) {
-            // 源文本里面第一个字段是命令名
-            switch (frame.header.type) {
-                case xmr::protocol::MessageType::Hello: {
-                    // worker启动的时候给master发一下
-                    worker.id = xmr::protocol::Hello::decode(frame.body).workerId;
-                    registry.add(worker.id, std::chrono::steady_clock::now());
-                    byId[worker.id] = &worker;
-                    break;
-                }
-                case xmr::protocol::MessageType::RequestTask: {
-                    // worker告诉master它空闲了 希望master给它派任务
-                    registry.markIdle(worker.id);
-                    worker.lastRequest = frame.header.requestId;
-                    break;
-                }
-                case xmr::protocol::MessageType::Done: {
-                    const auto done = xmr::protocol::Done::decode(frame.body);
-                    const auto held = registry.taskOf(worker.id);
-                    if (held && held->kind == xmr::taskKind(done.kind) && held->id == done.taskId) {
-                        scheduler.markDone(held->kind, held->id, held->attempt);
-                    }
-                    registry.complete(worker.id);
-                    break;
-                }
-                case xmr::protocol::MessageType::Fail: {
-                    const auto fail = xmr::protocol::Fail::decode(frame.body);
-                    const auto held = registry.taskOf(worker.id);
-                    if (held && held->kind == xmr::taskKind(fail.kind) && held->id == fail.taskId) {
-                        scheduler.markFailed(held->kind, held->id, fail.reason);
-                    }
-                    registry.complete(worker.id);
-                    break;
-                }
-                case xmr::protocol::MessageType::MapOutput: {
-                    // worker告诉master它完成了map任务 并把中间结果发送过来了
-                    const auto output = xmr::protocol::MapOutput::decode(frame.body);
-                    if (output.mapTask >= mapOutput.size() || output.partition >= reducers) {
-                        throw std::runtime_error("MAPOUT out of range");
-                    }
-                    const auto held = registry.taskOf(worker.id);
-                    if (!held || held->kind != xmr::TaskKind::Map || held->id != output.mapTask) {
+        auto acceptHandler = [&](std::uint32_t) {
+            try {
+                while (true) {
+                    xmr::net::Connection connection;
+                    const xmr::net::IoStatus status = listener.acceptNonBlocking(connection);
+                    if (status == xmr::net::IoStatus::WouldBlock) {
                         break;
                     }
-                    mapOutput[output.mapTask][output.partition] = toString(output.payload);
-                    break;
-                }
-                case xmr::protocol::MessageType::Fetch: {
-                    // worker准备执行reduce 跟master要reduce需要的kv
-                    const auto fetch = xmr::protocol::Fetch::decode(frame.body);
-                    if (fetch.mapTask >= mapOutput.size() || fetch.partition >= reducers) {
-                        throw std::runtime_error("FETCH out of range");
+                    if (status != xmr::net::IoStatus::Ok) {
+                        throw std::runtime_error("accept failed");
                     }
-                    const std::string& blob = mapOutput[fetch.mapTask][fetch.partition];
-                    xmr::protocol::DataMessage data;
-                    data.offset = 0;
-                    data.total = blob.size();
-                    data.payload = toBytes(blob);
-                    sendTo(worker, xmr::protocol::MessageType::Data, frame.header.requestId, data.encode());
-                    break;
+                    xmr::net::setNonBlocking(connection.fd());
+                    auto conn = std::make_shared<Conn>();
+                    conn->connection = std::move(connection);
+                    conn->id = nextConnId.fetch_add(1);
+                    conn->owner = &coordinator;
+                    conn->coordinatorLoop = &coordinatorLoop;
+                    conn->loop = ioGroup.next();
+                    xmr::net::EventLoop* workerLoop = conn->loop;
+                    coordinatorLoop.runInLoop([&coordinator, conn, workerLoop] {
+                        coordinator.onConnect(conn->id, conn);
+                        workerLoop->runInLoop([conn] { serveConn(conn); });
+                    });
                 }
-                case xmr::protocol::MessageType::InputRequest: {
-                    // worker准备执行map函数了 跟master要map需要的文件数据
-                    const auto request = xmr::protocol::InputRequest::decode(frame.body);
-                    if (request.taskId >= inputData.size()) {
-                        throw std::runtime_error("INPUT out of range");
-                    }
-                    const std::string& blob = inputData[request.taskId];
-                    xmr::protocol::DataMessage data;
-                    data.offset = 0;
-                    data.total = blob.size();
-                    data.payload = toBytes(blob);
-                    sendTo(worker, xmr::protocol::MessageType::Data, frame.header.requestId, data.encode());
-                    break;
-                }
-                case xmr::protocol::MessageType::Result: {
-                    // worker窒息给你执行完了reduce 把最终结果给到了master
-                    const auto result = xmr::protocol::ResultMessage::decode(frame.body);
-                    auto pairs = xmr::deserializeKeyValues(toString(result.payload));
-                    merged.insert(merged.end(),
-                                  std::make_move_iterator(pairs.begin()), std::make_move_iterator(pairs.end()));
-                    break;
-                }
-                case xmr::protocol::MessageType::Ping: {
-                    // worker周期心跳 master回Pong
-                    const auto ping = xmr::protocol::Ping::decode(frame.body);
-                    xmr::protocol::Pong pong;
-                    pong.nonce = ping.nonce;
-                    sendTo(worker, xmr::protocol::MessageType::Pong, frame.header.requestId, pong.encode());
-                    break;
-                }
-                default:
-                    throw std::runtime_error("unexpected control message");
+            } catch (const std::exception&) {
             }
         };
+        bossLoop.runInLoop([&] {
+            bossLoop.add(listener.fd(), xmr::net::kReadable, acceptHandler);
+        });
 
-        auto processInput = [&](Worker& worker) {
-            xmr::protocol::FrameDecoder decoder(worker.in);
-            while (auto frame = decoder.next()) {
-                handleFrame(worker, *frame);
-            }
-        };
+        doneFuture.wait();
 
-        // 重发任务 次数用尽才判整个job失败
-        auto retryOrFail = [&](const xmr::Task& task) {
-            if (!scheduler.retry(task)) {
-                scheduler.markFailed(task.kind, task.id, "attempts exhausted");
-            }
-        };
+        bossLoop.stop();
+        coordinatorLoop.stop();
+        ioGroup.stop();
+        bossThread.join();
+        coordinatorThread.join();
 
-        // 回收worker持有的任务 重发
-        auto requeueTask = [&](const std::string& id) {
-            const auto task = registry.reclaim(id);
-            if (task) {
-                retryOrFail(*task);
-            }
-        };
-
-        // 把坏掉的worker统一清理 任务回收重发
-        auto dropBroken = [&] {
-            for (auto it = workers.begin(); it != workers.end();) {
-                Worker& worker = **it;
-                if (!worker.broken) {
-                    ++it;
-                    continue;
-                }
-                if (!worker.id.empty()) {
-                    requeueTask(worker.id);
-                    registry.remove(worker.id);
-                    byId.erase(worker.id);
-                }
-                poller.remove(worker.connection.fd());
-                byFd.erase(worker.connection.fd());
-                it = workers.erase(it);
-            }
-        };
-
-        auto readWorker = [&](Worker& worker) {
-            if (worker.broken) {
-                return;
-            }
-            bool peerClosed = false;
-            while (true) {
-                const xmr::net::IoStatus status = xmr::net::recvInto(worker.connection.fd(), worker.in);
-                if (status == xmr::net::IoStatus::Ok) {
-                    continue;
-                }
-                if (status == xmr::net::IoStatus::WouldBlock) {
-                    break;
-                }
-                peerClosed = true;
-                break;
-            }
-            processInput(worker);
-            if (peerClosed) {
-                worker.broken = true;
-                return;
-            }
-            if (!worker.broken && registry.contains(worker.id)) {
-                registry.touch(worker.id, std::chrono::steady_clock::now());
-            }
-        };
-
-        auto acceptWorkers = [&] {
-            while (true) {
-                xmr::net::Connection connection;
-                const xmr::net::IoStatus status = listener.acceptNonBlocking(connection);
-                if (status == xmr::net::IoStatus::WouldBlock) {
-                    break;
-                }
-                if (status != xmr::net::IoStatus::Ok) {
-                    throw std::runtime_error("accept failed");
-                }
-                xmr::net::setNonBlocking(connection.fd());
-                auto worker = std::make_unique<Worker>();
-                worker->connection = std::move(connection);
-                byFd[worker->connection.fd()] = worker.get();
-                workers.push_back(std::move(worker));
-                poller.add(workers.back()->connection.fd(), xmr::net::kReadable);
-            }
-        };
-
-        auto dispatch = [&] {
-            if (workers.size() < expectedWorkers) {
-                return;
-            }
-            while (registry.hasIdle()) {
-                auto task = scheduler.takeTask();
-                if (!task) {
-                    break;
-                }
-                const auto id = registry.assignNext(*task, std::chrono::steady_clock::now());
-                if (!id) {
-                    break;
-                }
-                Worker* worker = byId[*id];
-                // master向worker派发任务
-                const auto message = xmr::toTaskMessage(*task);
-                sendTo(*worker, xmr::protocol::MessageType::Task, worker->lastRequest, message.encode());
-            }
-        };
-
-        while (!scheduler.finished() && !scheduler.failed()) {
-            const auto now = std::chrono::steady_clock::now();
-            for (const auto& event : poller.wait(registry.nextTimeoutMs(now))) {
-                if (event.fd == listener.fd()) {
-                    acceptWorkers();
-                    continue;
-                }
-                const auto it = byFd.find(event.fd);
-                if (it == byFd.end()) {
-                    continue;
-                }
-                if (event.events & xmr::net::kWritable) {
-                    flush(*it->second);
-                }
-                if (event.events & (xmr::net::kReadable | xmr::net::kBroken)) {
-                    readWorker(*it->second);
-                }
-            }
-            dropBroken();
-            const auto expired = registry.poll(std::chrono::steady_clock::now());
-            for (const auto& id : expired.workers) {
-                requeueTask(id);
-            }
-            for (const auto& task : expired.tasks) {
-                retryOrFail(task);
-            }
-            dispatch();
+        if (bossLoop.error()) {
+            std::rethrow_exception(bossLoop.error());
+        }
+        if (coordinatorLoop.error()) {
+            std::rethrow_exception(coordinatorLoop.error());
         }
 
-        for (auto& worker : workers) {
+        for (auto& [id, conn] : coordinator.conns()) {
             try {
                 const auto frame = xmr::protocol::makeFrame(xmr::protocol::MessageType::Stop, 0,
                                                             xmr::protocol::Stop{}.encode());
-                worker->out.append(frame);
-                xmr::net::setBlocking(worker->connection.fd());
-                while (!worker->out.empty()) {
-                    const std::size_t pending = worker->out.size();
-                    xmr::net::sendAll(worker->connection.fd(), worker->out.data(), pending);
-                    worker->out.consume(pending);
+                conn->out.append(frame);
+                xmr::net::setBlocking(conn->connection.fd());
+                while (!conn->out.empty()) {
+                    const std::size_t pending = conn->out.size();
+                    xmr::net::sendAll(conn->connection.fd(), conn->out.data(), pending);
+                    conn->out.consume(pending);
                 }
                 // Half-close, then drain any in-flight REQUEST so closing the
                 // socket does not reset the connection underneath the worker.
-                ::shutdown(worker->connection.fd(),SHUT_WR);
+                ::shutdown(conn->connection.fd(), SHUT_WR);
                 char buffer[256];
-                while (::read(worker->connection.fd(), buffer, sizeof(buffer)) > 0) {
+                while (::read(conn->connection.fd(), buffer, sizeof(buffer)) > 0) {
                 }
             } catch (const std::exception&) {
                 // Worker already disconnected; nothing to do at shutdown.
             }
         }
 
-        if (scheduler.failed()) {
-            throw std::runtime_error(scheduler.error());
+        if (coordinator.failed()) {
+            throw std::runtime_error(coordinator.error());
         }
 
+        auto& merged = coordinator.merged();
         std::stable_sort(merged.begin(), merged.end(),
                          [](const KeyValue& a, const KeyValue& b) {
                              return a.first < b.first;

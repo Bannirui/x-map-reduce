@@ -80,21 +80,26 @@ namespace xmr::net {
     }
 
     void EventLoop::run() {
-        threadId_ = std::this_thread::get_id();
+        threadId_.store(std::this_thread::get_id());
         while (!stopping_.load()) {
-            for (const Event& event : poller_.wait(timers_.timeoutMs())) {
-                if (event.fd == notifier_.fd()) {
-                    notifier_.drain();
-                    doPending();
-                    continue;
+            try {
+                for (const Event& event : poller_.wait(timers_.timeoutMs())) {
+                    if (event.fd == notifier_.fd()) {
+                        notifier_.drain();
+                        doPending();
+                        continue;
+                    }
+                    const auto it = handlers_.find(event.fd);
+                    if (it != handlers_.end()) {
+                        it->second(event.events);
+                    }
                 }
-                const auto it = handlers_.find(event.fd);
-                if (it != handlers_.end()) {
-                    it->second(event.events);
-                }
+                timers_.fire();
+                doPending();
+            } catch (...) {
+                error_ = std::current_exception();
+                stopping_.store(true);
             }
-            timers_.fire();
-            doPending();
         }
     }
 
@@ -152,7 +157,7 @@ namespace xmr::net {
     }
 
     bool EventLoop::isInLoopThread() const {
-        return std::this_thread::get_id() == threadId_;
+        return std::this_thread::get_id() == threadId_.load();
     }
 
     void EventLoop::wakeup() {

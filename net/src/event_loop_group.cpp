@@ -14,12 +14,7 @@ namespace xmr::net {
     }
 
     EventLoopGroup::~EventLoopGroup() {
-        for (auto& loop : loops_) {
-            loop->stop();
-        }
-        for (std::thread& thread : threads_) {
-            thread.join();
-        }
+        stop();
     }
 
     void EventLoopGroup::start() {
@@ -27,6 +22,17 @@ namespace xmr::net {
         for (auto& loop : loops_) {
             EventLoop* raw = loop.get();
             threads_.emplace_back([raw] { raw->run(); });
+        }
+    }
+
+    void EventLoopGroup::stop() {
+        for (auto& loop : loops_) {
+            loop->stop();
+        }
+        for (std::thread& thread : threads_) {
+            if (thread.joinable()) {
+                thread.join();
+            }
         }
     }
 

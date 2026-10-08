@@ -21,6 +21,8 @@ namespace xmr::net {
 
         void start();
 
+        void stop();
+
         EventLoop* next();
 
         std::size_t size() const {
