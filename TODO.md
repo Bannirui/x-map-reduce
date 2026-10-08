@@ -47,12 +47,13 @@ TODO
   - [ ] V6.1 用户提交任务给master master负责下发动态库给worker
     - [ ] 前置：常驻化 master/worker(while 循环服务，不再一个 job 就退出)
       - [X] worker: `Stop`=本job结束并复位状态(epoch防串)、`Shutdown`=退出；保持连接与心跳
-      - [ ] master: server启动一次、每job一份coordinator生命周期(等提交->跑->回复->复位)
-    - [ ] 插件由client读本地路径上传字节(分块+内容哈希)，master零FS依赖，按哈希下发给缺的worker
-    - [ ] Submit/Plugin/PluginAck 消息；worker收齐插件后再派任务
-    - [ ] 输入来源：先用master可访问的路径(共享盘)占位；上传输入数据作为后续独立一步(配合"文件系统")
-    - [ ] 输出去向：master写路径并回复 SubmitResult/流式回传客户端(后)
-  - [ ] V6.2 *(optional)* scripting jobs (Lua/Python) instead of native plugins
+      - [X] master: server启动一次、每job一份coordinator生命周期(等提交->跑->回复->复位)
+    - [X] Submit/SubmitAck/SubmitResult 消息 + `xmr-submit` 客户端
+    - [X] 输入来源：master本地路径(submitter与master同机/共享盘)；上传输入数据作为后续独立一步
+    - [X] 输出去向：master写路径并回复 SubmitResult；流式回传客户端(后)
+    - [ ] 插件下发：client读本地插件上传字节(分块+内容哈希)，master零FS依赖，按哈希下发给缺的worker
+    - [ ] Plugin/PluginAck 消息；worker收齐插件后落盘缓存+dlopen，再派任务
+  - [ ] V6.2 任务提交支持跨语言 这个要针对不同语言开发sdk 难度太大
 - [ ] V7 HA cluster master
   - [ ] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)
   - [ ] V7.1 persistent cluster master that accepts jobs; the per-job coordinator becomes a restartable driver

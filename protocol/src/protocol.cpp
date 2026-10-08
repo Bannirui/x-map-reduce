@@ -186,12 +186,15 @@ namespace xmr::protocol {
             case MessageType::Pong: return "PONG";
             case MessageType::Stop: return "STOP";
             case MessageType::Shutdown: return "SHUTDOWN";
+            case MessageType::Submit: return "SUBMIT";
+            case MessageType::SubmitAck: return "SUBMIT_ACK";
+            case MessageType::SubmitResult: return "SUBMIT_RESULT";
         }
         return "UNKNOWN";
     }
 
     std::optional<MessageType> parseMessageType(std::string_view name) {
-        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::Shutdown); ++raw) {
+        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::SubmitResult); ++raw) {
             const auto type = static_cast<MessageType>(raw);
             if (messageTypeName(type) == name) {
                 return type;

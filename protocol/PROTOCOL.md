@@ -75,6 +75,9 @@ enum class MessageType : uint8_t {
     Pong         = 13,  // 双向
     Stop         = 14,  // C -> W  本job结束 复位
     Shutdown     = 15,  // C -> W  worker退出进程
+    Submit       = 16,  // client -> master  提交任务(含输入路径/输出路径)
+    SubmitAck    = 17,  // master -> client  受理结果
+    SubmitResult = 18,  // master -> client  job执行结果
 };
 ```
 

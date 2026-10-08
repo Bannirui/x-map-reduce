@@ -459,4 +459,97 @@ namespace xmr::protocol {
         }
         return {};
     }
+
+    std::vector<std::uint8_t> Submit::encode() const {
+        FieldWriter writer;
+        writer.putString(submit::kJob, job);
+        writer.putU64(submit::kReducers, reducers);
+        writer.putU64(submit::kWorkers, workers);
+        writer.putString(submit::kOutput, output);
+        for (const auto& input : inputs) {
+            writer.putString(submit::kInput, input);
+        }
+        return writer.take();
+    }
+
+    Submit Submit::decode(const std::vector<std::uint8_t>& body) {
+        Submit message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case submit::kJob:
+                    message.job = reader.asString();
+                    break;
+                case submit::kReducers:
+                    message.reducers = reader.asU64();
+                    break;
+                case submit::kWorkers:
+                    message.workers = reader.asU64();
+                    break;
+                case submit::kOutput:
+                    message.output = reader.asString();
+                    break;
+                case submit::kInput:
+                    message.inputs.push_back(reader.asString());
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> SubmitAck::encode() const {
+        FieldWriter writer;
+        writer.putU64(submitAck::kStatusCode, static_cast<std::uint64_t>(statusCode));
+        writer.putString(submitAck::kReason, reason);
+        return writer.take();
+    }
+
+    SubmitAck SubmitAck::decode(const std::vector<std::uint8_t>& body) {
+        SubmitAck message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case submitAck::kStatusCode:
+                    message.statusCode = decodeStatus(reader.asU64());
+                    break;
+                case submitAck::kReason:
+                    message.reason = reader.asString();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> SubmitResult::encode() const {
+        FieldWriter writer;
+        writer.putU64(submitResult::kStatusCode, static_cast<std::uint64_t>(statusCode));
+        writer.putString(submitResult::kOutput, output);
+        writer.putString(submitResult::kReason, reason);
+        return writer.take();
+    }
+
+    SubmitResult SubmitResult::decode(const std::vector<std::uint8_t>& body) {
+        SubmitResult message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case submitResult::kStatusCode:
+                    message.statusCode = decodeStatus(reader.asU64());
+                    break;
+                case submitResult::kOutput:
+                    message.output = reader.asString();
+                    break;
+                case submitResult::kReason:
+                    message.reason = reader.asString();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
 } // namespace xmr::protocol

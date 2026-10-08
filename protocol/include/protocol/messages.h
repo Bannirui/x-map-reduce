@@ -157,4 +157,35 @@ namespace xmr::protocol {
 
         static Shutdown decode(const std::vector<std::uint8_t>& body);
     };
+
+    struct Submit {
+        std::string job;
+        std::uint64_t reducers = 1;
+        std::uint64_t workers = 1;
+        std::string output;
+        std::vector<std::string> inputs;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static Submit decode(const std::vector<std::uint8_t>& body);
+    };
+
+    struct SubmitAck {
+        StatusCode statusCode = StatusCode::Ok;
+        std::string reason;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static SubmitAck decode(const std::vector<std::uint8_t>& body);
+    };
+
+    struct SubmitResult {
+        StatusCode statusCode = StatusCode::Ok;
+        std::string output;
+        std::string reason;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static SubmitResult decode(const std::vector<std::uint8_t>& body);
+    };
 } // namespace xmr::protocol

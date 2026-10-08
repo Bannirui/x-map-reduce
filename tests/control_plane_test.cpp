@@ -88,16 +88,18 @@ std::map<std::string, std::string> readOutput(const fs::path& path) {
 
 }  // namespace
 
-// V4.2 integration: the master and two persistent workers exchange all
-// intermediate data over TCP (no shared work dir); only --output is a file.
+// V6.1 integration: a client submits a job to the running master, the master
+// distributes work to two persistent workers over TCP (no shared work dir);
+// only --output is a file.
 int main(int argc, char** argv) {
-    if (argc != 4) {
-        std::cerr << "Usage: control_plane_test <path-to-master> <path-to-worker> <path-to-job-plugin>\n";
+    if (argc != 5) {
+        std::cerr << "Usage: control_plane_test <path-to-master> <path-to-worker> <path-to-submit> <path-to-job-plugin>\n";
         return 2;
     }
     const std::string master = argv[1];
     const std::string worker = argv[2];
-    const std::string plugin = argv[3];
+    const std::string submit = argv[3];
+    const std::string plugin = argv[4];
 
     const fs::path dir = fs::temp_directory_path() / "x-map-reduce-control-plane-test";
     fs::remove_all(dir);
@@ -120,16 +122,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::vector<std::string> masterArgs = {
-        "--job", "word_count",
-        "--plugin", plugin,
-        "--reducers", std::to_string(reducers),
-        "--workers", "2",
         "--listen", "127.0.0.1:0",
-        "--output", output.string(),
     };
-    for (const auto& input : inputs) {
-        masterArgs.push_back(input.string());
-    }
 
     const pid_t masterPid = startProcess(master, masterArgs, pipeFds[1]);
     ::close(pipeFds[1]);
@@ -149,6 +143,22 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 2; ++i) {
         workerPids.push_back(startProcess(worker, {"--master", address, "--plugin", plugin}));
     }
+
+    // Submit the job and wait for the master to report the result.
+    std::vector<std::string> submitArgs = {
+        "--master", address,
+        "--job", "word_count",
+        "--reducers", std::to_string(reducers),
+        "--workers", "2",
+        "--output", output.string(),
+        "--shutdown",
+    };
+    for (const auto& input : inputs) {
+        submitArgs.push_back(input.string());
+    }
+    const pid_t submitPid = startProcess(submit, submitArgs);
+    check(submitPid > 0, "submit client should start");
+    check(waitProcess(submitPid) == 0, "submit client should exit 0");
 
     const int masterExit = waitProcess(masterPid);
     check(masterExit == 0, "master should exit 0, got " + std::to_string(masterExit));

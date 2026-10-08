@@ -37,6 +37,9 @@ namespace xmr::protocol {
         Pong = 13,
         Stop = 14,
         Shutdown = 15,
+        Submit = 16,
+        SubmitAck = 17,
+        SubmitResult = 18,
     };
 
     enum class WireType : std::uint8_t {
@@ -264,4 +267,23 @@ namespace xmr::protocol {
     namespace stop {
         inline constexpr std::uint16_t kReason = 1;
     } // namespace stop
+
+    namespace submit {
+        inline constexpr std::uint16_t kJob = 1;
+        inline constexpr std::uint16_t kReducers = 2;
+        inline constexpr std::uint16_t kWorkers = 3;
+        inline constexpr std::uint16_t kOutput = 4;
+        inline constexpr std::uint16_t kInput = 5;
+    } // namespace submit
+
+    namespace submitAck {
+        inline constexpr std::uint16_t kStatusCode = 1;
+        inline constexpr std::uint16_t kReason = 2;
+    } // namespace submitAck
+
+    namespace submitResult {
+        inline constexpr std::uint16_t kStatusCode = 1;
+        inline constexpr std::uint16_t kOutput = 2;
+        inline constexpr std::uint16_t kReason = 3;
+    } // namespace submitResult
 } // namespace xmr::protocol
