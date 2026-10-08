@@ -127,6 +127,9 @@ namespace xmr::net {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 return IoStatus::WouldBlock;
             }
+            if (errno == ECONNRESET || errno == EPIPE) {
+                return IoStatus::Closed;
+            }
             throw systemError("recv failed");
         }
     }

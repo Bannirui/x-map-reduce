@@ -56,9 +56,9 @@ TODO
   - [X] V8.3 nonblocking socket
   - [X] V8.4 更换协议
   - [X] V8.5 reactor模型 master/worker
-  - [ ] V8.6 reactor robustness
+  - [X] V8.6 reactor robustness
     - [X] heartbeat (`Ping`/`Pong`) + timeouts
-    - [ ] disconnect/task-failure handling (retry instead of aborting the job)
+    - [X] master处理worker断连情况
   - [ ] V8.7 large-blob streaming
     - use `flags.More` + `offset` so `Data`/`MapOutput` are chunked
     - drop the single 64MB frame ceiling

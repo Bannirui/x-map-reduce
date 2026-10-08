@@ -65,6 +65,8 @@ namespace {
         xmr::net::ByteBuffer out;
         std::string id;
         std::uint32_t lastRequest = 0;
+        // 连接已损坏(断开或发送失败) 等事件处理完统一回收
+        bool broken = false;
     };
 } // namespace
 
@@ -163,7 +165,9 @@ int main(int argc, char** argv) {
                 } else if (status == xmr::net::IoStatus::WouldBlock) {
                     break;
                 } else {
-                    throw std::runtime_error("worker disconnected while sending");
+                    // 发送失败 标记为坏连接 由主循环统一回收重发
+                    worker.broken = true;
+                    return;
                 }
             }
             updateInterest(worker);
@@ -295,23 +299,29 @@ int main(int argc, char** argv) {
             }
         };
 
-        // 断开/失联的worker从master清理掉 任务回收重发
-        auto dropWorker = [&](Worker& worker) {
-            if (!worker.id.empty()) {
-                requeueTask(worker.id);
-                registry.remove(worker.id);
-                byId.erase(worker.id);
+        // 把坏掉的worker统一清理 任务回收重发
+        auto dropBroken = [&] {
+            for (auto it = workers.begin(); it != workers.end();) {
+                Worker& worker = **it;
+                if (!worker.broken) {
+                    ++it;
+                    continue;
+                }
+                if (!worker.id.empty()) {
+                    requeueTask(worker.id);
+                    registry.remove(worker.id);
+                    byId.erase(worker.id);
+                }
+                poller.remove(worker.connection.fd());
+                byFd.erase(worker.connection.fd());
+                it = workers.erase(it);
             }
-            poller.remove(worker.connection.fd());
-            byFd.erase(worker.connection.fd());
-            workers.erase(std::remove_if(workers.begin(), workers.end(),
-                                         [&](const std::unique_ptr<Worker>& w) {
-                                             return w.get() == &worker;
-                                         }),
-                          workers.end());
         };
 
         auto readWorker = [&](Worker& worker) {
+            if (worker.broken) {
+                return;
+            }
             bool peerClosed = false;
             while (true) {
                 const xmr::net::IoStatus status = xmr::net::recvInto(worker.connection.fd(), worker.in);
@@ -324,12 +334,12 @@ int main(int argc, char** argv) {
                 peerClosed = true;
                 break;
             }
+            processInput(worker);
             if (peerClosed) {
-                dropWorker(worker);
+                worker.broken = true;
                 return;
             }
-            processInput(worker);
-            if (registry.contains(worker.id)) {
+            if (!worker.broken && registry.contains(worker.id)) {
                 registry.touch(worker.id, std::chrono::steady_clock::now());
             }
         };
@@ -391,6 +401,7 @@ int main(int argc, char** argv) {
                     readWorker(*it->second);
                 }
             }
+            dropBroken();
             const auto expired = registry.poll(std::chrono::steady_clock::now());
             for (const auto& id : expired.workers) {
                 requeueTask(id);
