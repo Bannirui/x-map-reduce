@@ -1,0 +1,53 @@
+TODO
+---
+
+- [X] V1 Single-process MapReduce
+- [X] V2 Multi-threaded MapReduce (parallel Map tasks)
+- [X] V3 Multi-process MapReduce
+  - [X] V3.0 multi-process Map(`fork`/`exec` one `map_worker` per input file)
+  - [X] V3.1 Map+Reduce processes(`reduce_worker` filters `fnv(key) % R`)
+  - [X] V3.2 partition intermediate data at the map side(`fnv(key) % R`)
+- [X] V4 Distributed MapReduce over TCP
+  - [X] V4.0 master on tcp
+  - [X] V4.1 data shuffle on tcp
+  - [X] V4.2 distributed input data
+- [ ] V5 Fault-tolerant MapReduce
+  - [ ] V5.0 task attempts
+    - idempotent retry
+    - task timeouts
+    - worker-death recovery
+  - [ ] V5.1 speculative execution
+    - duplicate slow tasks
+    - first attempt wins
+  - [ ] V5.2 heartbeat liveness
+    - extract worker management into its own class (`WorkerRegistry`: registration, idle/liveness), mirroring how `Scheduler` isolates task scheduling; the master keeps only I/O
+    - [ ] 定时任务功能 队列+selector
+      - [X] 小根堆+多个缓存标识逻辑删除
+      - [ ] 打标标识逻辑删除
+- [ ] V6 Job submission—submit arbitrary map/reduce to the master
+  - [X] V6.0 native plugin ABI
+    - versioned `extern "C"` map/reduce interface
+    - worker loads `job.so` with `dlopen`
+  - [ ] V6.1 submission+code distribution
+    - `SUBMIT`/`PLUGIN` messages
+    - plugin shipped once per worker, cached by content hash
+  - [ ] V6.2 *(optional)* scripting jobs (Lua/Python) instead of native plugins
+- [ ] V7 HA cluster master
+  - [ ] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)
+  - [ ] V7.1 persistent cluster master that accepts jobs; the per-job coordinator becomes a restartable driver
+  - [ ] V7.2 leader election via an external consensus store (ZooKeeper/etcd/Consul)
+- [X] V8 epoll+reactor
+  - [X] V8.1 [protocl enhanceman](./protocol/PROTOCOL.md)
+  - [X] V8.2 message and encoder/decoder
+  - [X] V8.3 nonblocking socket
+  - [X] V8.4 更换协议
+  - [X] V8.5 reactor模型 master/worker
+  - [ ] V8.6 reactor robustness
+    - heartbeat (`Ping`/`Pong`) + timeouts
+    - disconnect/task-failure handling (retry instead of aborting the job)
+  - [ ] V8.7 large-blob streaming
+    - use `flags.More` + `offset` so `Data`/`MapOutput` are chunked
+    - drop the single 64MB frame ceiling
+  - [ ] V8.8 move map/reduce compute off the event loop / multi-reactor
+    - business work on a thread pool (Netty-style)
+    - boss/acceptor + worker reactors

@@ -8,6 +8,10 @@ add_executable(net_test net_test.cpp)
 target_link_libraries(net_test PRIVATE x-net Threads::Threads)
 add_test(NAME net_test COMMAND net_test)
 
+add_executable(timer_test timer_test.cpp)
+target_link_libraries(timer_test PRIVATE x-net)
+add_test(NAME timer_test COMMAND timer_test)
+
 add_executable(protocol_test protocol_test.cpp)
 target_link_libraries(protocol_test PRIVATE x-protocol)
 add_test(NAME protocol_test COMMAND protocol_test)
