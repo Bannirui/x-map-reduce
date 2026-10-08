@@ -100,6 +100,16 @@ namespace xmr::net {
         }
     }
 
+    void setBlocking(int fd) {
+        const int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags < 0) {
+            throw systemError("fcntl(F_GETFL) failed");
+        }
+        if (::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+            throw systemError("fcntl(F_SETFL) failed");
+        }
+    }
+
     IoStatus recvInto(int fd, ByteBuffer& buffer) {
         std::uint8_t chunk[65536];
         while (true) {
@@ -118,6 +128,30 @@ namespace xmr::net {
                 return IoStatus::WouldBlock;
             }
             throw systemError("recv failed");
+        }
+    }
+
+    IoStatus sendFrom(int fd, const void* data, std::size_t size, std::size_t& sent) {
+        while (true) {
+            const ssize_t written = ::send(fd, data, size, MSG_NOSIGNAL);
+            if (written > 0) {
+                sent = static_cast<std::size_t>(written);
+                return IoStatus::Ok;
+            }
+            if (written == 0) {
+                sent = 0;
+                return IoStatus::Closed;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return IoStatus::WouldBlock;
+            }
+            if (errno == EPIPE || errno == ECONNRESET) {
+                return IoStatus::Closed;
+            }
+            throw systemError("send failed");
         }
     }
 
@@ -280,6 +314,23 @@ namespace xmr::net {
             if (errno != EINTR) {
                 throw systemError("accept failed");
             }
+        }
+    }
+
+    IoStatus Listener::acceptNonBlocking(Connection& out) const {
+        while (true) {
+            const int client = ::accept(fd_, nullptr, nullptr);
+            if (client >= 0) {
+                out = Connection(client);
+                return IoStatus::Ok;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return IoStatus::WouldBlock;
+            }
+            throw systemError("accept failed");
         }
     }
 

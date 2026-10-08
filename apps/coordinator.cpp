@@ -1,21 +1,22 @@
+#include"net/event_loop.h"
 #include"net/net.h"
+#include"protocol/framing.h"
 #include"protocol/messages.h"
 #include"runtime/exit_code.h"
 #include"runtime/jobs.h"
 #include"runtime/plugin.h"
 #include"runtime/scheduler.h"
 #include"runtime/task.h"
-#include"runtime/wire.h"
 
 #include<algorithm>
-#include<cerrno>
 #include<cstdint>
 #include<fstream>
 #include<iostream>
 #include<iterator>
-#include<poll.h>
+#include<memory>
 #include<stdexcept>
 #include<string>
+#include<unordered_map>
 #include<utility>
 #include<vector>
 
@@ -73,6 +74,8 @@ namespace {
 
     struct Worker {
         xmr::net::Connection connection;
+        xmr::net::ByteBuffer in;
+        xmr::net::ByteBuffer out;
         // worker节点状态
         bool idle = false;
         std::string id;
@@ -140,20 +143,54 @@ int main(int argc, char** argv) {
 
         const auto [host,port] = parseEndpoint(listen);
         xmr::net::Listener listener(host, port);
+        xmr::net::setNonBlocking(listener.fd());
         std::cout << "LISTENING " << host << ":" << listener.port() << std::endl;
 
         xmr::Scheduler scheduler(jobName, inputs, reducers);
         // worker启动时候会连进来 master管理的worker节点
-        std::vector<Worker> workers;
+        std::vector<std::unique_ptr<Worker> > workers;
+        std::unordered_map<int, Worker*> byFd;
+
+        xmr::net::Poller poller;
+        poller.add(listener.fd(), xmr::net::kReadable);
 
         // M*R 每个map任务要对自己的输出进行R的分区
         std::vector<std::vector<std::string> > mapOutput(inputs.size(), std::vector<std::string>(reducers));
         std::vector<KeyValue> merged;
 
+        auto updateInterest = [&](Worker& worker) {
+            std::uint32_t events = xmr::net::kReadable;
+            if (!worker.out.empty()) {
+                events |= xmr::net::kWritable;
+            }
+            poller.modify(worker.connection.fd(), events);
+        };
+
+        auto flush = [&](Worker& worker) {
+            while (!worker.out.empty()) {
+                std::size_t sent = 0;
+                const xmr::net::IoStatus status = xmr::net::sendFrom(
+                    worker.connection.fd(), worker.out.data(), worker.out.size(), sent);
+                if (status == xmr::net::IoStatus::Ok) {
+                    worker.out.consume(sent);
+                } else if (status == xmr::net::IoStatus::WouldBlock) {
+                    break;
+                } else {
+                    throw std::runtime_error("worker disconnected while sending");
+                }
+            }
+            updateInterest(worker);
+        };
+
+        auto sendTo = [&](Worker& worker, xmr::protocol::MessageType type, std::uint32_t requestId,
+                          const std::vector<std::uint8_t>& body, std::uint16_t flags = 0) {
+            const auto frame = xmr::protocol::makeFrame(type, requestId, body, flags);
+            worker.out.append(frame);
+            flush(worker);
+        };
+
         // master收worker发过来的消息
-        auto handleMessage = [&](Worker& worker) {
-            // 收到来自worker的消息
-            const xmr::protocol::Frame frame = xmr::receiveFrame(worker.connection.fd());
+        auto handleFrame = [&](Worker& worker, const xmr::protocol::Frame& frame) {
             // 源文本里面第一个字段是命令名
             switch (frame.header.type) {
                 case xmr::protocol::MessageType::Hello: {
@@ -199,8 +236,7 @@ int main(int argc, char** argv) {
                     data.offset = 0;
                     data.total = blob.size();
                     data.payload = toBytes(blob);
-                    xmr::sendFrame(worker.connection.fd(), xmr::protocol::MessageType::Data,
-                                   frame.header.requestId, data.encode());
+                    sendTo(worker, xmr::protocol::MessageType::Data, frame.header.requestId, data.encode());
                     break;
                 }
                 case xmr::protocol::MessageType::InputRequest: {
@@ -214,8 +250,7 @@ int main(int argc, char** argv) {
                     data.offset = 0;
                     data.total = blob.size();
                     data.payload = toBytes(blob);
-                    xmr::sendFrame(worker.connection.fd(), xmr::protocol::MessageType::Data,
-                                   frame.header.requestId, data.encode());
+                    sendTo(worker, xmr::protocol::MessageType::Data, frame.header.requestId, data.encode());
                     break;
                 }
                 case xmr::protocol::MessageType::Result: {
@@ -231,12 +266,52 @@ int main(int argc, char** argv) {
             }
         };
 
+        auto processInput = [&](Worker& worker) {
+            xmr::protocol::FrameDecoder decoder(worker.in);
+            while (auto frame = decoder.next()) {
+                handleFrame(worker, *frame);
+            }
+        };
+
+        auto readWorker = [&](Worker& worker) {
+            while (true) {
+                const xmr::net::IoStatus status = xmr::net::recvInto(worker.connection.fd(), worker.in);
+                if (status == xmr::net::IoStatus::Ok) {
+                    continue;
+                }
+                if (status == xmr::net::IoStatus::WouldBlock) {
+                    break;
+                }
+                throw std::runtime_error("worker disconnected");
+            }
+            processInput(worker);
+        };
+
+        auto acceptWorkers = [&] {
+            while (true) {
+                xmr::net::Connection connection;
+                const xmr::net::IoStatus status = listener.acceptNonBlocking(connection);
+                if (status == xmr::net::IoStatus::WouldBlock) {
+                    break;
+                }
+                if (status != xmr::net::IoStatus::Ok) {
+                    throw std::runtime_error("accept failed");
+                }
+                xmr::net::setNonBlocking(connection.fd());
+                auto worker = std::make_unique<Worker>();
+                worker->connection = std::move(connection);
+                byFd[worker->connection.fd()] = worker.get();
+                workers.push_back(std::move(worker));
+                poller.add(workers.back()->connection.fd(), xmr::net::kReadable);
+            }
+        };
+
         auto dispatch = [&] {
             if (workers.size() < expectedWorkers) {
                 return;
             }
             for (auto& worker : workers) {
-                if (!worker.idle) {
+                if (!worker->idle) {
                     continue;
                 }
                 auto task = scheduler.takeTask();
@@ -245,49 +320,47 @@ int main(int argc, char** argv) {
                 }
                 // master向worker派发任务
                 const auto message = toTaskMessage(*task);
-                xmr::sendFrame(worker.connection.fd(), xmr::protocol::MessageType::Task,
-                               worker.lastRequest, message.encode());
-                worker.idle = false;
+                sendTo(*worker, xmr::protocol::MessageType::Task, worker->lastRequest, message.encode());
+                worker->idle = false;
             }
         };
 
         while (!scheduler.finished() && !scheduler.failed()) {
-            std::vector<pollfd> fds;
-            fds.push_back(pollfd{listener.fd(),POLLIN, 0});
-            for (const auto& worker : workers) {
-                fds.push_back(pollfd{worker.connection.fd(),POLLIN, 0});
-            }
-
-            const int ready = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), -1);
-            if (ready < 0) {
-                if (errno == EINTR) {
+            for (const auto& event : poller.wait(-1)) {
+                if (event.fd == listener.fd()) {
+                    acceptWorkers();
                     continue;
                 }
-                throw std::runtime_error("poll failed");
-            }
-
-            for (std::size_t index = 1; index < fds.size(); ++index) {
-                if (fds[index].revents & (POLLIN | POLLHUP | POLLERR)) {
-                    handleMessage(workers[index - 1]);
+                const auto it = byFd.find(event.fd);
+                if (it == byFd.end()) {
+                    continue;
+                }
+                if (event.events & xmr::net::kWritable) {
+                    flush(*it->second);
+                }
+                if (event.events & (xmr::net::kReadable | xmr::net::kBroken)) {
+                    readWorker(*it->second);
                 }
             }
-
-            if (fds[0].revents & POLLIN) {
-                workers.push_back(Worker{listener.accept(), false});
-            }
-
             dispatch();
         }
 
         for (auto& worker : workers) {
             try {
-                xmr::protocol::Stop stop;
-                xmr::sendFrame(worker.connection.fd(), xmr::protocol::MessageType::Stop, 0, stop.encode());
+                const auto frame = xmr::protocol::makeFrame(xmr::protocol::MessageType::Stop, 0,
+                                                            xmr::protocol::Stop{}.encode());
+                worker->out.append(frame);
+                xmr::net::setBlocking(worker->connection.fd());
+                while (!worker->out.empty()) {
+                    const std::size_t pending = worker->out.size();
+                    xmr::net::sendAll(worker->connection.fd(), worker->out.data(), pending);
+                    worker->out.consume(pending);
+                }
                 // Half-close, then drain any in-flight REQUEST so closing the
                 // socket does not reset the connection underneath the worker.
-                ::shutdown(worker.connection.fd(),SHUT_WR);
+                ::shutdown(worker->connection.fd(),SHUT_WR);
                 char buffer[256];
-                while (::read(worker.connection.fd(), buffer, sizeof(buffer)) > 0) {
+                while (::read(worker->connection.fd(), buffer, sizeof(buffer)) > 0) {
                 }
             } catch (const std::exception&) {
                 // Worker already disconnected; nothing to do at shutdown.

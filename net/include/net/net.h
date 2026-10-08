@@ -49,7 +49,11 @@ namespace xmr::net {
 
     void setNonBlocking(int fd);
 
+    void setBlocking(int fd);
+
     IoStatus recvInto(int fd, ByteBuffer& buffer);
+
+    IoStatus sendFrom(int fd, const void* data, std::size_t size, std::size_t& sent);
 
     /**
      * @param fd 发送给谁
@@ -140,6 +144,8 @@ namespace xmr::net {
 
         // Block until a client connects and return the connected socket.
         Connection accept() const;
+
+        IoStatus acceptNonBlocking(Connection& out) const;
 
     private:
         // master监听的socket
