@@ -185,12 +185,13 @@ namespace xmr::protocol {
             case MessageType::Ping: return "PING";
             case MessageType::Pong: return "PONG";
             case MessageType::Stop: return "STOP";
+            case MessageType::Shutdown: return "SHUTDOWN";
         }
         return "UNKNOWN";
     }
 
     std::optional<MessageType> parseMessageType(std::string_view name) {
-        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::Stop); ++raw) {
+        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::Shutdown); ++raw) {
             const auto type = static_cast<MessageType>(raw);
             if (messageTypeName(type) == name) {
                 return type;

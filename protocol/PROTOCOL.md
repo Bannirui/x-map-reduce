@@ -73,7 +73,8 @@ enum class MessageType : uint8_t {
     Fail         = 11,  // W -> C
     Ping         = 12,  // 双向
     Pong         = 13,  // 双向
-    Stop         = 14,  // C -> W
+    Stop         = 14,  // C -> W  本job结束 复位
+    Shutdown     = 15,  // C -> W  worker退出进程
 };
 ```
 

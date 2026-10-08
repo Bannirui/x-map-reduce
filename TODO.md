@@ -12,7 +12,7 @@ TODO
   - [X] V4.1 data shuffle on tcp
   - [X] V4.2 distributed input data
 - [ ] V5 Fault-tolerant MapReduce
-  - [ ] V5.0 task attempts
+  - [X] V5.0 task attempts
     - idempotent retry
       - [X] Scheduler: attempt+requeue(放回未完成任务，first attempt wins)
       - [X] 陈旧attempt防护(迟到MapOutput/Done不覆盖新attempt)
@@ -21,9 +21,11 @@ TODO
     - worker-death recovery
       - [X] WorkerRegistry: Lost可复活/remove取回持有的task
       - [X] master: pollExpired/taskOf/requeue/remove重派 断开走同一路径
-  - [ ] V5.1 speculative execution
-    - duplicate slow tasks
-    - first attempt wins
+  - [ ] V5.1 长尾任务处理
+    - [ ] 任务进度上报(worker->master 新增Progress消息)
+    - [ ] master判定长尾并并发派发同一task的多个attempt(Scheduler支持并发InFlight)
+    - [ ] 协议回显attempt，first-完成wins 落败attempt的结果丢弃/取消
+    - [ ] 推测策略 落后阈值/最小运行时长 避免误判
   - [X] V5.2 heartbeat liveness
     - [X] 定时任务功能 队列+selector
       - [X] 小根堆+多个缓存标识逻辑删除
@@ -38,13 +40,18 @@ TODO
         - [X] 任务归属(worker->持有的task/attempt，供重发)
       - [X] master接入 只留 I/O，管理逻辑迁出
       - [X] worker假死重新上线回收
-- [ ] V6 Job submission—submit arbitrary map/reduce to the master
+- [ ] V6 任务的提交
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface
     - worker loads `job.so` with `dlopen`
-  - [ ] V6.1 submission+code distribution
-    - `SUBMIT`/`PLUGIN` messages
-    - plugin shipped once per worker, cached by content hash
+  - [ ] V6.1 用户提交任务给master master负责下发动态库给worker
+    - [ ] 前置：常驻化 master/worker(while 循环服务，不再一个 job 就退出)
+      - [X] worker: `Stop`=本job结束并复位状态(epoch防串)、`Shutdown`=退出；保持连接与心跳
+      - [ ] master: server启动一次、每job一份coordinator生命周期(等提交->跑->回复->复位)
+    - [ ] 插件由client读本地路径上传字节(分块+内容哈希)，master零FS依赖，按哈希下发给缺的worker
+    - [ ] Submit/Plugin/PluginAck 消息；worker收齐插件后再派任务
+    - [ ] 输入来源：先用master可访问的路径(共享盘)占位；上传输入数据作为后续独立一步(配合"文件系统")
+    - [ ] 输出去向：master写路径并回复 SubmitResult/流式回传客户端(后)
   - [ ] V6.2 *(optional)* scripting jobs (Lua/Python) instead of native plugins
 - [ ] V7 HA cluster master
   - [ ] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)

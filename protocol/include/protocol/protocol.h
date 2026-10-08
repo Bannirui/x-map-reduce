@@ -36,6 +36,7 @@ namespace xmr::protocol {
         Ping = 12,
         Pong = 13,
         Stop = 14,
+        Shutdown = 15,
     };
 
     enum class WireType : std::uint8_t {

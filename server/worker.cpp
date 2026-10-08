@@ -105,7 +105,20 @@ int main(int argc, char** argv) {
         // 分块DATA的接收缓冲 按requestId聚合
         std::unordered_map<std::uint32_t, std::string> incoming;
         std::size_t outstanding = 0;
-        bool stopped = false;
+        bool running = true;
+        // job代号 换job后自增 用来丢弃上一个job迟到的计算结果
+        std::uint64_t epoch = 0;
+
+        // 复位本次job的状态 准备接下一个job
+        auto resetJob = [&] {
+            ++epoch;
+            current.reset();
+            fetched.clear();
+            fetchIndex.clear();
+            incoming.clear();
+            outstanding = 0;
+            stage = Stage::RequestTask;
+        };
 
         // 任意线程都可以投递 只有reactor线程会执行
         auto post = [&](std::function<void()> completion) {
@@ -214,8 +227,13 @@ int main(int argc, char** argv) {
 
         auto handleFrame = [&](const xmr::protocol::Frame& frame) {
             if (frame.header.type == xmr::protocol::MessageType::Stop) {
-                // master告诉worker任务结束了 可以关停了
-                stopped = true;
+                // master告诉worker本job结束了 复位状态准备接下一个job
+                resetJob();
+                return;
+            }
+            if (frame.header.type == xmr::protocol::MessageType::Shutdown) {
+                // master要关停了 worker退出循环
+                running = false;
                 return;
             }
             if (frame.header.type == xmr::protocol::MessageType::Pong) {
@@ -264,21 +282,28 @@ int main(int argc, char** argv) {
                 if (stage == Stage::WaitingInput) {
                     // worker收到master给的map任务数据 计算丢到线程池 算完再回reactor发结果
                     const xmr::Task task = *current;
+                    const std::uint64_t job = epoch;
                     current.reset();
                     stage = Stage::Computing;
-                    pool.submit([&, task, content = payload] {
+                    pool.submit([&, task, content = payload, job] {
                         std::vector<std::vector<KeyValue> > parts;
                         try {
                             parts = xmr::runMapTask(task, content);
                         } catch (const std::exception& error) {
                             const std::string reason = error.what();
-                            post([&, task, reason] {
+                            post([&, task, reason, job] {
+                                if (job != epoch) {
+                                    return;
+                                }
                                 failTask(task, reason);
                                 stage = Stage::RequestTask;
                             });
                             return;
                         }
-                        post([&, task, parts = std::move(parts)]() mutable {
+                        post([&, task, parts = std::move(parts), job]() mutable {
+                            if (job != epoch) {
+                                return;
+                            }
                             sendMapOutput(task, parts);
                             sendDone(task);
                             stage = Stage::RequestTask;
@@ -295,10 +320,11 @@ int main(int argc, char** argv) {
                     fetchIndex.erase(it);
                     if (--outstanding == 0) {
                         const xmr::Task task = *current;
+                        const std::uint64_t job = epoch;
                         current.reset();
                         stage = Stage::Computing;
                         std::vector<std::vector<KeyValue> > data = std::move(fetched);
-                        pool.submit([&, task, data = std::move(data)] {
+                        pool.submit([&, task, data = std::move(data), job] {
                             std::vector<KeyValue> result;
                             try {
                                 auto fetch = [&data](std::size_t mapTask, std::size_t) {
@@ -307,13 +333,19 @@ int main(int argc, char** argv) {
                                 result = xmr::runReduceTask(task, fetch);
                             } catch (const std::exception& error) {
                                 const std::string reason = error.what();
-                                post([&, task, reason] {
+                                post([&, task, reason, job] {
+                                    if (job != epoch) {
+                                        return;
+                                    }
                                     failTask(task, reason);
                                     stage = Stage::RequestTask;
                                 });
                                 return;
                             }
-                            post([&, task, result = std::move(result)]() mutable {
+                            post([&, task, result = std::move(result), job]() mutable {
+                                if (job != epoch) {
+                                    return;
+                                }
                                 sendResult(task, result);
                                 sendDone(task);
                                 stage = Stage::RequestTask;
@@ -334,7 +366,7 @@ int main(int argc, char** argv) {
         out.append(xmr::protocol::makeFrame(xmr::protocol::MessageType::Hello, 0, hello.encode()));
         flush();
 
-        while (!stopped) {
+        while (running) {
             if (stage == Stage::RequestTask) {
                 // worker告诉master我空闲了 给我个任务
                 sendFrame(xmr::protocol::MessageType::RequestTask, ++requestId, {});
@@ -367,7 +399,7 @@ int main(int argc, char** argv) {
                     while (auto frame = decoder.next()) {
                         handleFrame(*frame);
                     }
-                    if (peerClosed && !stopped) {
+                    if (peerClosed && running) {
                         throw std::runtime_error("master disconnected");
                     }
                 }

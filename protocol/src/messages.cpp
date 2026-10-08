@@ -448,4 +448,15 @@ namespace xmr::protocol {
         }
         return message;
     }
+
+    std::vector<std::uint8_t> Shutdown::encode() const {
+        return {};
+    }
+
+    Shutdown Shutdown::decode(const std::vector<std::uint8_t>& body) {
+        FieldReader reader(body);
+        while (reader.next()) {
+        }
+        return {};
+    }
 } // namespace xmr::protocol

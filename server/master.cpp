@@ -597,8 +597,8 @@ int main(int argc, char** argv) {
 
         for (auto& [id, conn] : coordinator.conns()) {
             try {
-                const auto frame = xmr::protocol::makeFrame(xmr::protocol::MessageType::Stop, 0,
-                                                            xmr::protocol::Stop{}.encode());
+                const auto frame = xmr::protocol::makeFrame(xmr::protocol::MessageType::Shutdown, 0,
+                                                            xmr::protocol::Shutdown{}.encode());
                 conn->out.append(frame);
                 xmr::net::setBlocking(conn->connection.fd());
                 while (!conn->out.empty()) {

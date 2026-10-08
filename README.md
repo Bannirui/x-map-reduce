@@ -3,7 +3,7 @@ map-reduce
 
 c++ implements paper(MapReduce: Simplified Data Processing on Large Clusters)
 
-refer to https://static.googleusercontent.com/media/research.google.com/en//archive/mapreduce-osdi04.pdf
+refer to [Jeff的MapReduce论文](https://static.googleusercontent.com/media/research.google.com/en//archive/mapreduce-osdi04.pdf)
 
 ## 1 QUICK START
 

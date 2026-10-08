@@ -151,4 +151,10 @@ namespace xmr::protocol {
 
         static Stop decode(const std::vector<std::uint8_t>& body);
     };
+
+    struct Shutdown {
+        std::vector<std::uint8_t> encode() const;
+
+        static Shutdown decode(const std::vector<std::uint8_t>& body);
+    };
 } // namespace xmr::protocol
