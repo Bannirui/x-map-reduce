@@ -7,6 +7,7 @@
 #include<utility>
 
 #include<arpa/inet.h>
+#include<fcntl.h>
 #include<netdb.h>
 #include<netinet/in.h>
 #include<sys/socket.h>
@@ -88,6 +89,37 @@ namespace xmr::net {
             return 0;
         }
     } // namespace
+
+    void setNonBlocking(int fd) {
+        const int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags < 0) {
+            throw systemError("fcntl(F_GETFL) failed");
+        }
+        if (::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            throw systemError("fcntl(F_SETFL) failed");
+        }
+    }
+
+    IoStatus recvInto(int fd, ByteBuffer& buffer) {
+        std::uint8_t chunk[65536];
+        while (true) {
+            const ssize_t received = ::recv(fd, chunk, sizeof(chunk), 0);
+            if (received > 0) {
+                buffer.append(chunk, static_cast<std::size_t>(received));
+                return IoStatus::Ok;
+            }
+            if (received == 0) {
+                return IoStatus::Closed;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return IoStatus::WouldBlock;
+            }
+            throw systemError("recv failed");
+        }
+    }
 
     void sendAll(int fd, const void* data, std::size_t size) {
         // 要发送的数据缓冲

@@ -1,5 +1,7 @@
 #pragma once
 
+#include"net/buffer.h"
+
 #include<cstddef>
 #include<cstdint>
 #include<string>
@@ -38,6 +40,16 @@
 namespace xmr::net {
     // net层只搬运消息 约定消息协议 [4字节放数据长度][该长度字节的payload] 但是我们协议约定消息大小上限制是64MB
     inline constexpr std::uint32_t kMaxMessageBytes = 64u * 1024u * 1024u;
+
+    enum class IoStatus {
+        Ok,
+        WouldBlock,
+        Closed,
+    };
+
+    void setNonBlocking(int fd);
+
+    IoStatus recvInto(int fd, ByteBuffer& buffer);
 
     /**
      * @param fd 发送给谁
