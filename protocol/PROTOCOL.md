@@ -80,6 +80,8 @@ enum class MessageType : uint8_t {
     SubmitResult = 18,  // master -> client  job执行结果
     Pull         = 19,  // worker -> worker  拉某个map任务的某个分区
     DataAddress  = 20,  // worker -> master  上报数据面监听端口
+    Plugin       = 21,  // client -> master / master -> worker  插件二进制分块
+    PluginAck    = 22,  // worker -> master  插件加载结果
 };
 ```
 

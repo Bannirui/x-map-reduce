@@ -138,16 +138,18 @@ int main(int argc, char** argv) {
         listenLine.size() > prefix.size() ? listenLine.substr(prefix.size()) : "";
     check(!address.empty(), "master should report a non-empty address");
 
-    // Launch the persistent workers the master is waiting for.
+    // Launch the persistent workers; they get the plugin at runtime from the master.
+    const fs::path pluginCache = dir / "plugins";
     std::vector<pid_t> workerPids;
     for (int i = 0; i < 2; ++i) {
-        workerPids.push_back(startProcess(worker, {"--master", address, "--plugin", plugin}));
+        workerPids.push_back(startProcess(worker, {"--master", address, "--plugin-cache", pluginCache.string()}));
     }
 
-    // Submit the job and wait for the master to report the result.
+    // Submit the job (uploading the plugin) and wait for the result.
     std::vector<std::string> submitArgs = {
         "--master", address,
         "--job", "word_count",
+        "--plugin", plugin,
         "--reducers", std::to_string(reducers),
         "--workers", "2",
         "--output", output.string(),

@@ -472,6 +472,7 @@ namespace xmr::protocol {
         writer.putU64(submit::kReducers, reducers);
         writer.putU64(submit::kWorkers, workers);
         writer.putString(submit::kOutput, output);
+        writer.putString(submit::kPluginHash, pluginHash);
         for (const auto& input : inputs) {
             writer.putString(submit::kInput, input);
         }
@@ -494,6 +495,9 @@ namespace xmr::protocol {
                     break;
                 case submit::kOutput:
                     message.output = reader.asString();
+                    break;
+                case submit::kPluginHash:
+                    message.pluginHash = reader.asString();
                     break;
                 case submit::kInput:
                     message.inputs.push_back(reader.asString());
@@ -596,6 +600,68 @@ namespace xmr::protocol {
         while (reader.next()) {
             if (reader.id() == dataAddress::kPort) {
                 message.port = reader.asU64();
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> Plugin::encode() const {
+        FieldWriter writer;
+        writer.putString(plugin::kHash, hash);
+        writer.putString(plugin::kJob, job);
+        writer.putU64(plugin::kOffset, offset);
+        writer.putBytes(plugin::kPayload, payload);
+        return writer.take();
+    }
+
+    Plugin Plugin::decode(const std::vector<std::uint8_t>& body) {
+        Plugin message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case plugin::kHash:
+                    message.hash = reader.asString();
+                    break;
+                case plugin::kJob:
+                    message.job = reader.asString();
+                    break;
+                case plugin::kOffset:
+                    message.offset = reader.asU64();
+                    break;
+                case plugin::kPayload:
+                    message.payload = reader.asBytes();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> PluginAck::encode() const {
+        FieldWriter writer;
+        writer.putString(pluginAck::kHash, hash);
+        writer.putU64(pluginAck::kOk, ok ? 1u : 0u);
+        writer.putString(pluginAck::kReason, reason);
+        return writer.take();
+    }
+
+    PluginAck PluginAck::decode(const std::vector<std::uint8_t>& body) {
+        PluginAck message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case pluginAck::kHash:
+                    message.hash = reader.asString();
+                    break;
+                case pluginAck::kOk:
+                    message.ok = reader.asU64() != 0;
+                    break;
+                case pluginAck::kReason:
+                    message.reason = reader.asString();
+                    break;
+                default:
+                    break;
             }
         }
         return message;

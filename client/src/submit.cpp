@@ -8,8 +8,8 @@
 namespace {
     void usage(const char* program) {
         std::cerr << "Usage: " << program
-            << " --master <host:port> --job <name> [--reducers <R>] [--workers <N>] [--shutdown]"
-            << " --output <file> <input...>\n";
+            << " --master <host:port> --job <name> [--plugin <path>] [--reducers <R>]"
+            << " [--workers <N>] [--shutdown] --output <file> <input...>\n";
     }
 } // namespace
 
@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
     std::string master;
     std::string job;
     std::string output;
+    std::string pluginPath;
     std::uint64_t reducers = 1;
     std::uint64_t workers = 1;
     std::vector<std::string> inputs;
@@ -28,6 +29,8 @@ int main(int argc, char** argv) {
             master = argv[++i];
         } else if (arg == "--job" && i + 1 < argc) {
             job = argv[++i];
+        } else if (arg == "--plugin" && i + 1 < argc) {
+            pluginPath = argv[++i];
         } else if (arg == "--reducers" && i + 1 < argc) {
             reducers = std::stoull(argv[++i]);
         } else if (arg == "--workers" && i + 1 < argc) {
@@ -54,6 +57,7 @@ int main(int argc, char** argv) {
         request.workers = workers;
         request.output = output;
         request.inputs = inputs;
+        request.pluginPath = pluginPath;
 
         std::string reason;
         if (!client.submit(request, reason)) {

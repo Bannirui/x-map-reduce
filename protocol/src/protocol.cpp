@@ -169,8 +169,22 @@ namespace xmr::protocol {
         out.push_back(static_cast<std::uint8_t>(value));
     }
 
-    std::string_view messageTypeName(MessageType type) {
-        switch (type) {
+    std::string contentHash(const std::vector<std::uint8_t>& data) {
+        std::uint64_t hash = 1469598103934665603ull;
+        for (std::uint8_t byte : data) {
+            hash ^= byte;
+            hash *= 1099511628211ull;
+        }
+        static const char* digits = "0123456789abcdef";
+        std::string out(16, '0');
+        for (int i = 15; i >= 0; --i) {
+            out[static_cast<std::size_t>(i)] = digits[hash & 0xf];
+            hash >>= 4;
+        }
+        return out;
+    }
+
+    std::string_view messageTypeName(MessageType type) {        switch (type) {
             case MessageType::Hello: return "HELLO";
             case MessageType::HelloAck: return "HELLO_ACK";
             case MessageType::RequestTask: return "REQUEST_TASK";
@@ -191,12 +205,14 @@ namespace xmr::protocol {
             case MessageType::SubmitResult: return "SUBMIT_RESULT";
             case MessageType::Pull: return "PULL";
             case MessageType::DataAddress: return "DATA_ADDRESS";
+            case MessageType::Plugin: return "PLUGIN";
+            case MessageType::PluginAck: return "PLUGIN_ACK";
         }
         return "UNKNOWN";
     }
 
     std::optional<MessageType> parseMessageType(std::string_view name) {
-        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::DataAddress); ++raw) {
+        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::PluginAck); ++raw) {
             const auto type = static_cast<MessageType>(raw);
             if (messageTypeName(type) == name) {
                 return type;

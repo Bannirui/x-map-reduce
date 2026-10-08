@@ -15,6 +15,9 @@ xmr_client* xmr_client_connect(const char* endpoint);
 
 void xmr_client_close(xmr_client* client);
 
+// 设置要随任务上传的插件.so本地路径(可选)
+void xmr_client_set_plugin(xmr_client* client, const char* pluginPath);
+
 /**
  * 提交任务给master
  * @return 0-master受理任务了

@@ -11,6 +11,7 @@ struct xmr_client {
     }
 
     xmr::client::Client impl;
+    std::string pluginPath;
 };
 
 namespace {
@@ -37,6 +38,12 @@ extern "C" {
         delete client;
     }
 
+    void xmr_client_set_plugin(xmr_client* client, const char* pluginPath) {
+        if (client != nullptr) {
+            client->pluginPath = pluginPath == nullptr ? "" : pluginPath;
+        }
+    }
+
     int xmr_client_submit(xmr_client* client, const char* job, uint64_t reducers, uint64_t workers,
                           const char* output, const char* const* inputs, size_t inputCount,
                           char* reason, size_t reasonCapacity) {
@@ -49,6 +56,7 @@ extern "C" {
             request.reducers = reducers;
             request.workers = workers;
             request.output = output == nullptr ? "" : output;
+            request.pluginPath = client->pluginPath;
             for (std::size_t i = 0; i < inputCount; ++i) {
                 request.inputs.emplace_back(inputs[i] == nullptr ? "" : inputs[i]);
             }

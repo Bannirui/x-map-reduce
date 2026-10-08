@@ -58,8 +58,10 @@ TODO
     - [X] 任务提交client端侧的约定 给跨语言做准备
     - [X] 输入来源：master本地路径(submitter与master同机/共享盘)；上传输入数据作为后续独立一步
     - [X] 输出去向：master写路径并回复 SubmitResult；流式回传客户端(后)
-    - [ ] 插件下发：client读本地插件上传字节(分块+内容哈希)，master零FS依赖，按哈希下发给缺的worker
-    - [ ] Plugin/PluginAck 消息；worker收齐插件后落盘缓存+dlopen，再派任务
+    - [X] 插件下发：client读本地插件上传字节(分块+内容哈希)，master零FS依赖，按哈希下发给缺的worker
+    - [X] Plugin/PluginAck 消息；worker收齐插件后落盘缓存(dlopen前原子rename)+dlopen，再派任务
+    - [X] 插件按内容哈希缓存 worker本地跨job复用(已加载不再重发)
+    - [ ] 插件/输入等bulk目前走控制连接(分块)，后续移到数据面(master开data listener供client上传/worker拉取)
   - [ ] V6.2 任务提交支持跨语言 这个要针对不同语言开发sdk 难度太大
 - [ ] V7 HA cluster master
   - [X] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)

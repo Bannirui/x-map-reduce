@@ -6,6 +6,7 @@
 #include"protocol/framing.h"
 #include"protocol/messages.h"
 #include"runtime/exit_code.h"
+#include"runtime/jobs.h"
 #include"runtime/plugin.h"
 #include"runtime/task.h"
 #include"runtime/task_codec.h"
@@ -13,6 +14,8 @@
 #include<algorithm>
 #include<chrono>
 #include<cstdint>
+#include<filesystem>
+#include<fstream>
 #include<functional>
 #include<iostream>
 #include<mutex>
@@ -154,6 +157,8 @@ int main(int argc, char** argv) {
     std::string master;
     // job的插件
     std::vector<std::string> plugins;
+    // 运行期收到的插件落盘缓存目录
+    std::string pluginCache;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -161,7 +166,14 @@ int main(int argc, char** argv) {
             master = argv[++i];
         } else if (arg == "--plugin" && i + 1 < argc) {
             plugins.emplace_back(argv[++i]);
+        } else if (arg == "--plugin-cache" && i + 1 < argc) {
+            pluginCache = argv[++i];
         }
+    }
+
+    if (pluginCache.empty()) {
+        const char* home = ::getenv("HOME");
+        pluginCache = std::string(home != nullptr ? home : "/tmp") + "/.cache/xmr/plugins";
     }
 
     try {
@@ -172,6 +184,9 @@ int main(int argc, char** argv) {
         for (const auto& plugin : plugins) {
             loadJobPlugin(plugin);
         }
+        // 插件缓存目录
+        std::error_code cacheError;
+        std::filesystem::create_directories(pluginCache, cacheError);
         const auto [host,portText] = parseEndpoint(master);
         const std::uint16_t port = static_cast<std::uint16_t>(std::stoul(portText));
         // TCP连接
@@ -202,6 +217,8 @@ int main(int argc, char** argv) {
         Stage stage = Stage::RequestTask;
         std::optional<xmr::Task> current;
         std::unordered_map<std::uint32_t, std::string> incoming;
+        // 运行期下发插件的接收缓冲 按hash聚合
+        std::unordered_map<std::string, std::string> pluginIncoming;
         bool running = true;
         // job代号 换job后自增 用来丢弃上一个job迟到的计算结果
         std::uint64_t epoch = 0;
@@ -389,6 +406,50 @@ int main(int argc, char** argv) {
             }
             if (frame.header.type == xmr::protocol::MessageType::Pong) {
                 // master对心跳的应答 暂时不需要处理
+                return;
+            }
+            if (frame.header.type == xmr::protocol::MessageType::Plugin) {
+                // master下发插件字节 落盘缓存后dlopen
+                const auto chunk = xmr::protocol::Plugin::decode(frame.body);
+                std::string& buffer = pluginIncoming[chunk.hash];
+                if (chunk.offset != buffer.size()) {
+                    throw std::runtime_error("out of order PLUGIN chunk");
+                }
+                buffer.append(chunk.payload.begin(), chunk.payload.end());
+                if ((frame.header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) != 0) {
+                    return;
+                }
+                const std::string bytes = std::move(buffer);
+                pluginIncoming.erase(chunk.hash);
+                bool ok = true;
+                std::string reason;
+                try {
+                    const std::string path = pluginCache + "/" + chunk.hash + ".so";
+                    // 先写临时文件再原子rename 避免多个worker并发写同一个缓存文件
+                    const std::string tmp = path + ".tmp-" + std::to_string(::getpid());
+                    {
+                        std::ofstream out(tmp, std::ios::binary);
+                        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                    }
+                    std::error_code renameError;
+                    std::filesystem::rename(tmp, path, renameError);
+                    if (renameError) {
+                        std::filesystem::remove(tmp, renameError);
+                    }
+                    loadJobPlugin(path);
+                    if (findJob(chunk.job) == nullptr) {
+                        ok = false;
+                        reason = "plugin does not provide job '" + chunk.job + "'";
+                    }
+                } catch (const std::exception& error) {
+                    ok = false;
+                    reason = error.what();
+                }
+                xmr::protocol::PluginAck ack;
+                ack.hash = chunk.hash;
+                ack.ok = ok;
+                ack.reason = reason;
+                sendFrame(xmr::protocol::MessageType::PluginAck, 0, ack.encode());
                 return;
             }
             if (frame.header.type == xmr::protocol::MessageType::Task) {

@@ -33,14 +33,14 @@ across jobs):
 ```sh
 cd ./build/bin
 for i in 1 2 3; do
-  ./x-worker --master 127.0.0.1:9527 --plugin ../lib/word_count.so &
+  ./x-worker --master 127.0.0.1:9527 &
 done
 wait
 ```
 
-> `--plugin` points at the job's shared object; jobs are no longer compiled in.
-> (Runtime plugin distribution to workers is still TODO, so point each worker at
-> the `.so` for now.)
+> workers no longer need the plugin up front: the master ships the `.so` to each
+> worker at submit time (cached by content hash, loaded with `dlopen`).
+> `--plugin-cache <dir>` overrides the cache dir (default `~/.cache/xmr/plugins`).
 
 ### 1.1.3 submit a job
 
@@ -51,6 +51,7 @@ cd ./build/bin
 
 ./xmr-submit --master 127.0.0.1:9527 \
   --job word_count \
+  --plugin ../lib/word_count.so \
   --workers 3 \
   --reducers 3 \
   --output wc.txt \
@@ -58,7 +59,9 @@ cd ./build/bin
 ```
 
 > only the master needs the input files; workers fetch their splits over TCP.
-> `--workers 3` withholds all work until exactly 3 workers have connected.
+> `--plugin` is the client's local `.so`; it is uploaded to the master and
+> distributed to the workers (the master does not need it on disk).
+> `--workers 3` withholds all work until exactly 3 workers have loaded the plugin.
 > add `--shutdown` to stop the master (and its workers) after the job.
 > submit again to run another job on the same running master/workers.
 

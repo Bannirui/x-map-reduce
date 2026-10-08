@@ -166,6 +166,8 @@ namespace xmr::protocol {
         std::uint64_t workers = 1;
         std::string output;
         std::vector<std::string> inputs;
+        // 插件的内容哈希 为空表示worker本地已预加载
+        std::string pluginHash;
 
         std::vector<std::uint8_t> encode() const;
 
@@ -208,5 +210,27 @@ namespace xmr::protocol {
         std::vector<std::uint8_t> encode() const;
 
         static DataAddress decode(const std::vector<std::uint8_t>& body);
+    };
+
+    // 插件二进制分块传输 client->master 或 master->worker
+    struct Plugin {
+        std::string hash;
+        std::string job;
+        std::uint64_t offset = 0;
+        std::vector<std::uint8_t> payload;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static Plugin decode(const std::vector<std::uint8_t>& body);
+    };
+
+    struct PluginAck {
+        std::string hash;
+        bool ok = false;
+        std::string reason;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static PluginAck decode(const std::vector<std::uint8_t>& body);
     };
 } // namespace xmr::protocol

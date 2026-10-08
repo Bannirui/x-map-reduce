@@ -21,10 +21,12 @@
 #include<iostream>
 #include<iterator>
 #include<memory>
+#include<optional>
 #include<stdexcept>
 #include<string>
 #include<thread>
 #include<unordered_map>
+#include<unordered_set>
 #include<utility>
 #include<vector>
 
@@ -63,6 +65,8 @@ namespace {
         // coordinator线程写 用于回填派发时的请求id
         std::string workerId;
         std::uint32_t lastRequest = 0;
+        // 这个worker已经加载过的插件哈希
+        std::unordered_set<std::string> plugins;
         // worker reactor线程独占
         bool broken = false;
     };
@@ -103,7 +107,8 @@ namespace {
     struct JobState {
         JobState(std::string job, std::vector<std::string> inputs, std::size_t reducers,
                  std::vector<std::string> inputData, std::size_t expectedWorkers, std::string output, ConnId client)
-            : scheduler(std::move(job), inputs, reducers),
+            : scheduler(job, inputs, reducers),
+              name(std::move(job)),
               inputData(std::move(inputData)),
               expectedWorkers(expectedWorkers),
               output(std::move(output)),
@@ -111,6 +116,7 @@ namespace {
         }
 
         xmr::Scheduler scheduler;
+        std::string name;
         std::vector<std::string> inputData;
         std::vector<KeyValue> merged;
         std::size_t expectedWorkers = 1;
@@ -161,6 +167,9 @@ namespace {
 
         void submitJob(ConnId client, const xmr::protocol::Submit& submit, std::uint32_t requestId);
 
+        // 把当前job的插件分块发给某个worker 它没有的话
+        void sendPlugin(ConnId id);
+
         void finishJob();
 
         void dispatch();
@@ -195,6 +204,22 @@ namespace {
         std::unordered_map<std::string, std::pair<std::string, std::uint16_t> > workerData_;
         // map任务的结果在哪个worker上
         std::unordered_map<std::size_t, std::string> mapOwner_;
+
+        // 正在等插件字节的提交 client + 元数据
+        struct Pending {
+            ConnId client = 0;
+            xmr::protocol::Submit submit;
+            std::uint32_t requestId = 0;
+        };
+        std::optional<Pending> pending_;
+        // 插件字节的接收缓冲
+        std::vector<std::uint8_t> uploadBuffer_;
+        // 按内容哈希存插件二进制
+        std::unordered_map<std::string, std::vector<std::uint8_t> > pluginStore_;
+        // 当前job的插件哈希 空表示worker本地已预加载
+        std::string pluginHash_;
+        // 已经加载当前插件的worker数
+        std::size_t pluginReady_ = 0;
         std::unique_ptr<JobState> job_;
         std::atomic<bool> stopping_{false};
         std::string error_;
@@ -252,10 +277,48 @@ namespace {
         job_ = std::make_unique<JobState>(submit.job, submit.inputs, submit.reducers,
                                           std::move(inputData), submit.workers, submit.output, client);
         mapOwner_.clear();
+        pluginHash_ = submit.pluginHash;
+        pluginReady_ = 0;
+        // 有插件的话分发给还没加载的worker
+        if (!pluginHash_.empty()) {
+            for (const auto& entry : byWorker_) {
+                const auto it = conns_.find(entry.second);
+                if (it != conns_.end() && it->second->plugins.count(pluginHash_) != 0) {
+                    ++pluginReady_;
+                } else {
+                    sendPlugin(entry.second);
+                }
+            }
+        }
 
         xmr::protocol::SubmitAck ack;
         ack.statusCode = xmr::protocol::StatusCode::Ok;
         send(client, xmr::protocol::MessageType::SubmitAck, requestId, ack.encode());
+    }
+
+    void Coordinator::sendPlugin(ConnId id) {
+        if (pluginHash_.empty()) {
+            return;
+        }
+        const auto bytes = pluginStore_.find(pluginHash_);
+        if (bytes == pluginStore_.end()) {
+            return;
+        }
+        const std::vector<std::uint8_t>& plugin = bytes->second;
+        std::size_t offset = 0;
+        do {
+            const std::size_t n = std::min<std::size_t>(xmr::protocol::kChunkBytes, plugin.size() - offset);
+            xmr::protocol::Plugin chunk;
+            chunk.hash = pluginHash_;
+            chunk.job = job_ ? job_->name : "";
+            chunk.offset = offset;
+            chunk.payload.assign(plugin.begin() + static_cast<std::ptrdiff_t>(offset),
+                                 plugin.begin() + static_cast<std::ptrdiff_t>(offset + n));
+            const bool more = offset + n < plugin.size();
+            send(id, xmr::protocol::MessageType::Plugin, 0, chunk.encode(),
+                 more ? static_cast<std::uint16_t>(xmr::protocol::Flag::More) : 0);
+            offset += n;
+        } while (offset < plugin.size());
     }
 
     void Coordinator::finishJob() {
@@ -300,14 +363,66 @@ namespace {
             switch (frame.header.type) {
                 case xmr::protocol::MessageType::Submit: {
                     // client提交一个job
-                    if (job_) {
+                    if (job_ || pending_) {
                         xmr::protocol::SubmitAck ack;
                         ack.statusCode = xmr::protocol::StatusCode::Unavailable;
                         ack.reason = "a job is already running";
                         send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
                         break;
                     }
-                    submitJob(id, xmr::protocol::Submit::decode(frame.body), frame.header.requestId);
+                    const auto submit = xmr::protocol::Submit::decode(frame.body);
+                    if (!submit.pluginHash.empty()) {
+                        // 先等插件字节上传完 再开跑
+                        pending_ = Pending{id, submit, frame.header.requestId};
+                        uploadBuffer_.clear();
+                        break;
+                    }
+                    submitJob(id, submit, frame.header.requestId);
+                    break;
+                }
+                case xmr::protocol::MessageType::Plugin: {
+                    // client上传插件字节
+                    if (!pending_ || pending_->client != id) {
+                        break;
+                    }
+                    const auto chunk = xmr::protocol::Plugin::decode(frame.body);
+                    if (chunk.hash != pending_->submit.pluginHash || chunk.offset != uploadBuffer_.size()) {
+                        fail("bad plugin upload");
+                        break;
+                    }
+                    uploadBuffer_.insert(uploadBuffer_.end(), chunk.payload.begin(), chunk.payload.end());
+                    if ((frame.header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) != 0) {
+                        break;
+                    }
+                    if (xmr::protocol::contentHash(uploadBuffer_) != pending_->submit.pluginHash) {
+                        xmr::protocol::SubmitAck ack;
+                        ack.statusCode = xmr::protocol::StatusCode::Internal;
+                        ack.reason = "plugin hash mismatch";
+                        send(pending_->client, xmr::protocol::MessageType::SubmitAck, pending_->requestId, ack.encode());
+                        pending_.reset();
+                        uploadBuffer_.clear();
+                        break;
+                    }
+                    pluginStore_[pending_->submit.pluginHash] = uploadBuffer_;
+                    const Pending job = *pending_;
+                    pending_.reset();
+                    uploadBuffer_.clear();
+                    submitJob(job.client, job.submit, job.requestId);
+                    break;
+                }
+                case xmr::protocol::MessageType::PluginAck: {
+                    // worker加载插件的结果
+                    const auto ack = xmr::protocol::PluginAck::decode(frame.body);
+                    if (pluginHash_.empty() || ack.hash != pluginHash_) {
+                        break;
+                    }
+                    if (!ack.ok) {
+                        fail("worker failed to load plugin: " + ack.reason);
+                        break;
+                    }
+                    if (conn.plugins.insert(ack.hash).second) {
+                        ++pluginReady_;
+                    }
                     break;
                 }
                 case xmr::protocol::MessageType::Shutdown: {
@@ -320,6 +435,9 @@ namespace {
                     conn.workerId = xmr::protocol::Hello::decode(frame.body).workerId;
                     registry_.add(conn.workerId, std::chrono::steady_clock::now());
                     byWorker_[conn.workerId] = id;
+                    if (job_ && !pluginHash_.empty() && conn.plugins.count(pluginHash_) == 0) {
+                        sendPlugin(id);
+                    }
                     break;
                 }
                 case xmr::protocol::MessageType::DataAddress: {
@@ -412,6 +530,9 @@ namespace {
         }
         const std::shared_ptr<Conn> conn = it->second;
         if (!conn->workerId.empty()) {
+            if (!pluginHash_.empty() && conn->plugins.count(pluginHash_) != 0 && pluginReady_ > 0) {
+                --pluginReady_;
+            }
             recoverWorker(conn->workerId);
             registry_.remove(conn->workerId);
             byWorker_.erase(conn->workerId);
@@ -442,6 +563,9 @@ namespace {
 
     void Coordinator::dispatch() {
         if (byWorker_.size() < job_->expectedWorkers) {
+            return;
+        }
+        if (!pluginHash_.empty() && pluginReady_ < job_->expectedWorkers) {
             return;
         }        while (registry_.hasIdle()) {
             auto task = job_->scheduler.takeTask();

@@ -16,6 +16,8 @@ namespace xmr::client {
         std::uint64_t workers = 1;
         std::string output;
         std::vector<std::string> inputs;
+        // 插件.so的本地路径 由client读出来上传 为空表示worker本地已预加载
+        std::string pluginPath;
     };
 
     // job执行结果
@@ -44,7 +46,8 @@ namespace xmr::client {
         void shutdown();
 
     private:
-        void send(protocol::MessageType type, std::uint32_t requestId, const std::vector<std::uint8_t>& body);
+        void send(protocol::MessageType type, std::uint32_t requestId,
+                  const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
 
         protocol::Frame receive();
 

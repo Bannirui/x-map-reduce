@@ -42,6 +42,8 @@ namespace xmr::protocol {
         SubmitResult = 18,
         Pull = 19,
         DataAddress = 20,
+        Plugin = 21,
+        PluginAck = 22,
     };
 
     enum class WireType : std::uint8_t {
@@ -278,6 +280,7 @@ namespace xmr::protocol {
         inline constexpr std::uint16_t kWorkers = 3;
         inline constexpr std::uint16_t kOutput = 4;
         inline constexpr std::uint16_t kInput = 5;
+        inline constexpr std::uint16_t kPluginHash = 6;
     } // namespace submit
 
     namespace submitAck {
@@ -299,4 +302,20 @@ namespace xmr::protocol {
     namespace dataAddress {
         inline constexpr std::uint16_t kPort = 1;
     } // namespace dataAddress
+
+    namespace plugin {
+        inline constexpr std::uint16_t kHash = 1;
+        inline constexpr std::uint16_t kJob = 2;
+        inline constexpr std::uint16_t kOffset = 3;
+        inline constexpr std::uint16_t kPayload = 4;
+    } // namespace plugin
+
+    namespace pluginAck {
+        inline constexpr std::uint16_t kHash = 1;
+        inline constexpr std::uint16_t kOk = 2;
+        inline constexpr std::uint16_t kReason = 3;
+    } // namespace pluginAck
+
+    // 内容哈希(FNV-1a 64) 十六进制 用作插件的缓存key
+    std::string contentHash(const std::vector<std::uint8_t>& data);
 } // namespace xmr::protocol
