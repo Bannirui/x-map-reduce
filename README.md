@@ -12,18 +12,23 @@ chmod +x ./build.sh
 ./build.sh && ctest --test-dir build --output-on-failure
 ```
 
-Run from `build/bin`: the binaries, the plugins and the copied `asset/` inputs all resolve from there.
+Run from `build/bin`: the binaries and the copied `asset/` inputs all resolve from there.
 
 ### 1.1.1 start master
 
 ```sh
 cd ./build/bin
 
-./x-master --listen 127.0.0.1:9527
+./x-master --listen 127.0.0.1:9527 --data-listen 127.0.0.1:9331
 ```
 
 > the master is a persistent server: it only listens and waits for a job to be
-> submitted via `xmr-submit`. It prints `LISTENING <host:port>` once ready.
+> submitted via `xmr-submit`. It prints `LISTENING <host:port>` (control plane)
+> and `DATA_LISTENING <host:port>` (data plane) once ready.
+>
+> all bulk traffic (map input, plugin, shuffle) goes over the data plane; the
+> control plane only carries small messages. `--data-listen <host:port>` pins the
+> data port (default: control host with port 9331).
 
 ### 1.1.2 start workers
 
@@ -65,6 +70,25 @@ cd ./build/bin
 > add `--shutdown` to stop the master (and its workers) after the job.
 > submit again to run another job on the same running master/workers.
 
-## 2 FEATURE
+## 2 ARCHITECTURE
+
+- `x-master` is a persistent coordination server. It owns job metadata only
+  (scheduling, worker liveness) and never carries bulk data.
+- `x-worker` is a persistent worker. It runs map/reduce on a thread pool so the
+  reactor keeps heartbeating, and it keeps map output locally for shuffle.
+- `xmr-submit` is the client: it submits a job and uploads the job plugin.
+- **Control / data plane split**: small messages (submit, heartbeat, task
+  scheduling, done/fail) go to the control port (`--listen`); bulk traffic (map
+  input, plugin binaries, shuffle) goes to the data port (`--data-listen`,
+  default `9331`).
+- **Shuffle is worker-to-worker**: map workers keep their output; reduce workers
+  pull partitions directly from map workers. The master only hands out the
+  "which worker to pull which partition" metadata.
+- **Plugins** are shipped by content hash, cached per worker (atomic write +
+  `dlopen`), and only sent to workers that do not have them.
+- **Fault tolerance**: heartbeat/timeouts, task retry with attempts, and
+  re-running completed maps whose worker died before reduce pulled them.
+
+## 3 FEATURE
 
 refer to [TODO](./TODO.md)

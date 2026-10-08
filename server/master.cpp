@@ -45,6 +45,8 @@ namespace {
     constexpr std::chrono::milliseconds kTick{20};
     // worker reactor的线程数
     constexpr std::size_t kIoThreads{4};
+    // 数据面默认端口(孟德尔豌豆实验的9331)
+    constexpr std::uint16_t kDefaultDataPort = 9331;
 
     using ConnId = std::uint64_t;
 
@@ -755,13 +757,17 @@ namespace {
 } // namespace
 
 int main(int argc, char** argv) {
-    // master端口
+    // master控制面端口
     std::string listen = "127.0.0.1:9527";
+    // master数据面端口 不填则控制面host + 默认9331
+    std::string dataListen;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--listen" && i + 1 < argc) {
             listen = argv[++i];
+        } else if (arg == "--data-listen" && i + 1 < argc) {
+            dataListen = argv[++i];
         }
     }
 
@@ -772,9 +778,16 @@ int main(int argc, char** argv) {
         std::cout << "LISTENING " << host << ":" << listener.port() << std::endl;
 
         // 数据面 listener: worker拉输入/插件 client上传插件
-        xmr::net::Listener dataListener(host, 0);
+        std::string dataHost = host;
+        std::uint16_t dataPort = kDefaultDataPort;
+        if (!dataListen.empty()) {
+            const auto [dh, dp] = parseEndpoint(dataListen);
+            dataHost = dh;
+            dataPort = dp;
+        }
+        xmr::net::Listener dataListener(dataHost, dataPort);
         xmr::net::setNonBlocking(dataListener.fd());
-        std::cout << "DATA_LISTENING " << host << ":" << dataListener.port() << std::endl;
+        std::cout << "DATA_LISTENING " << dataHost << ":" << dataListener.port() << std::endl;
 
         Coordinator coordinator;
         xmr::net::EventLoopGroup ioGroup(kIoThreads);
@@ -786,7 +799,7 @@ int main(int argc, char** argv) {
         std::future<void> doneFuture = donePromise.get_future();
         coordinator.setOnShutdown([&donePromise] { donePromise.set_value(); });
         coordinator.setLoop(&coordinatorLoop);
-        coordinator.setDataAddress(host, dataListener.port());
+        coordinator.setDataAddress(dataHost, dataListener.port());
 
         std::thread coordinatorThread([&] { coordinatorLoop.run(); });
         ioGroup.start();
