@@ -1,6 +1,5 @@
 #include"net/event_loop.h"
 #include"net/net.h"
-#include"net/timer.h"
 #include"protocol/framing.h"
 #include"protocol/messages.h"
 #include"runtime/exit_code.h"
@@ -9,6 +8,7 @@
 #include"runtime/scheduler.h"
 #include"runtime/task.h"
 #include"runtime/task_codec.h"
+#include"runtime/worker_registry.h"
 
 #include<algorithm>
 #include<chrono>
@@ -61,14 +61,8 @@ namespace {
         xmr::net::Connection connection;
         xmr::net::ByteBuffer in;
         xmr::net::ByteBuffer out;
-        // worker节点状态
-        bool idle = false;
         std::string id;
         std::uint32_t lastRequest = 0;
-        // 最近一次收到该worker消息的时间
-        std::chrono::steady_clock::time_point lastSeen;
-        // 心跳看门狗 收到消息就重置
-        xmr::net::TimerQueue::TimerId watchdog = xmr::net::TimerQueue::kInvalidId;
     };
 } // namespace
 
@@ -142,9 +136,8 @@ int main(int argc, char** argv) {
 
         xmr::net::Poller poller;
         poller.add(listener.fd(), xmr::net::kReadable);
-        xmr::net::TimerQueue timers;
-        bool workerLost = false;
-        std::string lostReason;
+        xmr::WorkerRegistry registry(kHeartbeatTimeout);
+        std::unordered_map<std::string, Worker*> byId;
 
         // M*R 每个map任务要对自己的输出进行R的分区
         std::vector<std::vector<std::string> > mapOutput(inputs.size(), std::vector<std::string>(reducers));
@@ -181,17 +174,6 @@ int main(int argc, char** argv) {
             flush(worker);
         };
 
-        // 收到worker消息就重置它的心跳看门狗
-        auto armWatchdog = [&](Worker& worker) {
-            timers.cancel(worker.watchdog);
-            worker.lastSeen = std::chrono::steady_clock::now();
-            Worker* target = &worker;
-            worker.watchdog = timers.addAfter(kHeartbeatTimeout, [target, &workerLost, &lostReason] {
-                workerLost = true;
-                lostReason = "worker " + target->id + " heartbeat timeout";
-            });
-        };
-
         // master收worker发过来的消息
         auto handleFrame = [&](Worker& worker, const xmr::protocol::Frame& frame) {
             // 源文本里面第一个字段是命令名
@@ -199,24 +181,26 @@ int main(int argc, char** argv) {
                 case xmr::protocol::MessageType::Hello: {
                     // worker启动的时候给master发一下
                     worker.id = xmr::protocol::Hello::decode(frame.body).workerId;
+                    registry.add(worker.id, std::chrono::steady_clock::now());
+                    byId[worker.id] = &worker;
                     break;
                 }
                 case xmr::protocol::MessageType::RequestTask: {
                     // worker告诉master它空闲了 希望master给它派任务
-                    worker.idle = true;
+                    registry.markIdle(worker.id);
                     worker.lastRequest = frame.header.requestId;
                     break;
                 }
                 case xmr::protocol::MessageType::Done: {
                     const auto done = xmr::protocol::Done::decode(frame.body);
                     scheduler.markDone(xmr::taskKind(done.kind));
-                    worker.idle = false;
+                    registry.complete(worker.id);
                     break;
                 }
                 case xmr::protocol::MessageType::Fail: {
                     const auto fail = xmr::protocol::Fail::decode(frame.body);
                     scheduler.markFailed(xmr::taskKind(fail.kind), fail.taskId, fail.reason);
-                    worker.idle = false;
+                    registry.complete(worker.id);
                     break;
                 }
                 case xmr::protocol::MessageType::MapOutput: {
@@ -296,7 +280,9 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("worker disconnected");
             }
             processInput(worker);
-            armWatchdog(worker);
+            if (registry.contains(worker.id)) {
+                registry.touch(worker.id, std::chrono::steady_clock::now());
+            }
         };
 
         auto acceptWorkers = [&] {
@@ -322,23 +308,25 @@ int main(int argc, char** argv) {
             if (workers.size() < expectedWorkers) {
                 return;
             }
-            for (auto& worker : workers) {
-                if (!worker->idle) {
-                    continue;
-                }
+            while (registry.hasIdle()) {
                 auto task = scheduler.takeTask();
                 if (!task) {
                     break;
                 }
+                const auto id = registry.assignNext(*task);
+                if (!id) {
+                    break;
+                }
+                Worker* worker = byId[*id];
                 // master向worker派发任务
                 const auto message = xmr::toTaskMessage(*task);
                 sendTo(*worker, xmr::protocol::MessageType::Task, worker->lastRequest, message.encode());
-                worker->idle = false;
             }
         };
 
         while (!scheduler.finished() && !scheduler.failed()) {
-            for (const auto& event : poller.wait(timers.timeoutMs())) {
+            const auto now = std::chrono::steady_clock::now();
+            for (const auto& event : poller.wait(registry.nextTimeoutMs(now))) {
                 if (event.fd == listener.fd()) {
                     acceptWorkers();
                     continue;
@@ -354,9 +342,8 @@ int main(int argc, char** argv) {
                     readWorker(*it->second);
                 }
             }
-            timers.fire();
-            if (workerLost) {
-                throw std::runtime_error(lostReason);
+            for (const auto& id : registry.pollExpired(std::chrono::steady_clock::now())) {
+                throw std::runtime_error("worker " + id + " heartbeat timeout");
             }
             dispatch();
         }
