@@ -120,7 +120,7 @@ namespace xmr {
             WorkerState state = WorkerState::Registered;
             TimePoint lastSeen;
             // master对worker心跳看门狗定时任务编号 定时任务编号0是哨兵无效值 有效值是从1开始的
-            net::TimerQueue::TimerId watchdog = 0;
+            net::TimerQueue::TimerId watchdog = net::TimerQueue::kInvalidId;
             // worker处理的任务
             std::optional<Task> task;
         };

@@ -143,7 +143,7 @@ namespace xmr {
         // 心跳看门狗到期了 说明整个心跳阈值期间没有收到woker的心跳 判定它下线了
         it->second.state = WorkerState::Lost;
         // 心跳看门狗的定时任务编号抹成哨兵值
-        it->second.watchdog = 0;
+        it->second.watchdog = net::TimerQueue::kInvalidId;
         // 判定主观下线
         lost_.push_back(id);
     }

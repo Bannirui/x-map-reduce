@@ -15,6 +15,8 @@ namespace xmr::net {
         using TimePoint = Clock::time_point;
         using Duration = Clock::duration;
         using TimerId = std::uint64_t;
+        // 定时任务编号0是哨兵无效值 有效值是从1开始的
+        static constexpr TimerId kInvalidId = 0;
         using Callback = std::function<void()>;
 
         /**
@@ -51,7 +53,7 @@ namespace xmr::net {
     private:
         struct Timer {
             // 任务编号 0是哨兵无效值 有效值是从1开始的
-            TimerId id = 0;
+            TimerId id = kInvalidId;
             TimePoint deadline;
             Duration interval{};
             Callback callback;

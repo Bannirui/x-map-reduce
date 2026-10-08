@@ -23,13 +23,15 @@ TODO
     - [X] 定时任务功能 队列+selector
       - [X] 小根堆+多个缓存标识逻辑删除
       - [X] 打标标识逻辑删除
-      - [ ] 定时任务id的哨兵值0抽出来
+      - [X] 定时任务id的哨兵值0抽出来
     - [X] worker-master两端的ping-pong
     - [ ] 抽离master的资源管理职责
-      - [ ] 注册/身份(accept+Hello)
-      - [ ] 空闲/忙(idle, lastRequest)
-      - [ ] 存活/心跳(lastSeen, watchdog, 超时判定)
-      - [ ] 任务归属(worker -> 持有的 task/attempt，供重发)
+      - [X] 定义`WorkerRegistry`
+        - [X] 注册/身份(accept+Hello)
+        - [X] 空闲/忙(idle, lastRequest)
+        - [X] 存活/心跳(lastSeen, watchdog, 超时判定)
+        - [X] 任务归属(worker->持有的task/attempt，供重发)
+      - [ ] master 接入：只留 I/O，管理逻辑迁出
 - [ ] V6 Job submission—submit arbitrary map/reduce to the master
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface

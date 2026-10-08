@@ -68,7 +68,7 @@ namespace {
         // 最近一次收到该worker消息的时间
         std::chrono::steady_clock::time_point lastSeen;
         // 心跳看门狗 收到消息就重置
-        xmr::net::TimerQueue::TimerId watchdog = 0;
+        xmr::net::TimerQueue::TimerId watchdog = xmr::net::TimerQueue::kInvalidId;
     };
 } // namespace
 
