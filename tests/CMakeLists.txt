@@ -8,6 +8,10 @@ add_executable(net_test net_test.cpp)
 target_link_libraries(net_test PRIVATE x-net Threads::Threads)
 add_test(NAME net_test COMMAND net_test)
 
+add_executable(protocol_test protocol_test.cpp)
+target_link_libraries(protocol_test PRIVATE x-protocol)
+add_test(NAME protocol_test COMMAND protocol_test)
+
 add_executable(control_plane_test control_plane_test.cpp)
 target_link_libraries(control_plane_test PRIVATE x-mapreduce)
 add_dependencies(control_plane_test x-coordinator x-worker plugin_word_count)

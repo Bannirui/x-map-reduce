@@ -78,3 +78,5 @@ wait
   - [ ] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)
   - [ ] V7.1 persistent cluster master that accepts jobs; the per-job coordinator becomes a restartable driver
   - [ ] V7.2 leader election via an external consensus store (ZooKeeper/etcd/Consul)
+- [ ] V8 epoll+reactor
+  - [ ] V8.1 [protocl enhanceman](./protocol/PROTOCOL.md)

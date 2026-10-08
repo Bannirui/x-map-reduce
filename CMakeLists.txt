@@ -23,6 +23,7 @@ include(CTest)
 
 add_subdirectory(src)
 add_subdirectory(net)
+add_subdirectory(protocol)
 add_subdirectory(runtime)
 add_subdirectory(jobs)
 add_subdirectory(apps)
