@@ -26,6 +26,7 @@ add_subdirectory(net)
 add_subdirectory(protocol)
 add_subdirectory(runtime)
 add_subdirectory(jobs)
+add_subdirectory(client)
 add_subdirectory(server)
 
 if(BUILD_TESTING)

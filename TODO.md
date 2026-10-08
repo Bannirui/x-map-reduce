@@ -48,7 +48,7 @@ TODO
     - [ ] 前置：常驻化 master/worker(while 循环服务，不再一个 job 就退出)
       - [X] worker: `Stop`=本job结束并复位状态(epoch防串)、`Shutdown`=退出；保持连接与心跳
       - [X] master: server启动一次、每job一份coordinator生命周期(等提交->跑->回复->复位)
-    - [X] Submit/SubmitAck/SubmitResult 消息 + `xmr-submit` 客户端
+    - [X] 任务提交client端侧的约定 给跨语言做准备
     - [X] 输入来源：master本地路径(submitter与master同机/共享盘)；上传输入数据作为后续独立一步
     - [X] 输出去向：master写路径并回复 SubmitResult；流式回传客户端(后)
     - [ ] 插件下发：client读本地插件上传字节(分块+内容哈希)，master零FS依赖，按哈希下发给缺的worker

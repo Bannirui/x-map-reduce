@@ -3,6 +3,3 @@ target_link_libraries(x-master PRIVATE x-runtime x-net)
 
 add_executable(x-worker worker.cpp)
 target_link_libraries(x-worker PRIVATE x-runtime x-net)
-
-add_executable(xmr-submit submit.cpp)
-target_link_libraries(xmr-submit PRIVATE x-runtime x-protocol x-net)
