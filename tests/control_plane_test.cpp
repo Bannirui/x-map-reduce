@@ -26,7 +26,7 @@ void check(bool condition, const std::string& message) {
 }
 
 // Fork/exec `program`; when stdoutFd >= 0 the child's stdout is redirected to
-// it (used to capture the coordinator's LISTENING line).
+// it (used to capture the master's LISTENING line).
 pid_t startProcess(const std::string& program,
                    const std::vector<std::string>& args,
                    int stdoutFd = -1) {
@@ -88,14 +88,14 @@ std::map<std::string, std::string> readOutput(const fs::path& path) {
 
 }  // namespace
 
-// V4.2 integration: the coordinator and two persistent workers exchange all
+// V4.2 integration: the master and two persistent workers exchange all
 // intermediate data over TCP (no shared work dir); only --output is a file.
 int main(int argc, char** argv) {
     if (argc != 4) {
-        std::cerr << "Usage: control_plane_test <path-to-coordinator> <path-to-worker> <path-to-job-plugin>\n";
+        std::cerr << "Usage: control_plane_test <path-to-master> <path-to-worker> <path-to-job-plugin>\n";
         return 2;
     }
-    const std::string coordinator = argv[1];
+    const std::string master = argv[1];
     const std::string worker = argv[2];
     const std::string plugin = argv[3];
 
@@ -113,13 +113,13 @@ int main(int argc, char** argv) {
 
     const fs::path output = dir / "out.txt";
 
-    // Start the coordinator, capturing stdout so we can read its bound port.
+    // Start the master, capturing stdout so we can read its bound port.
     int pipeFds[2];
     if (::pipe(pipeFds) != 0) {
         std::cerr << "FAIL: pipe failed\n";
         return 1;
     }
-    std::vector<std::string> coordinatorArgs = {
+    std::vector<std::string> masterArgs = {
         "--job", "word_count",
         "--plugin", plugin,
         "--reducers", std::to_string(reducers),
@@ -128,30 +128,30 @@ int main(int argc, char** argv) {
         "--output", output.string(),
     };
     for (const auto& input : inputs) {
-        coordinatorArgs.push_back(input.string());
+        masterArgs.push_back(input.string());
     }
 
-    const pid_t coordinatorPid = startProcess(coordinator, coordinatorArgs, pipeFds[1]);
+    const pid_t masterPid = startProcess(master, masterArgs, pipeFds[1]);
     ::close(pipeFds[1]);
-    check(coordinatorPid > 0, "coordinator should start");
+    check(masterPid > 0, "master should start");
 
     const std::string listenLine = readLine(pipeFds[0]);
     ::close(pipeFds[0]);
     const std::string prefix = "LISTENING ";
     check(listenLine.rfind(prefix, 0) == 0,
-          "coordinator should announce its address, got: '" + listenLine + "'");
+          "master should announce its address, got: '" + listenLine + "'");
     const std::string address =
         listenLine.size() > prefix.size() ? listenLine.substr(prefix.size()) : "";
-    check(!address.empty(), "coordinator should report a non-empty address");
+    check(!address.empty(), "master should report a non-empty address");
 
-    // Launch the persistent workers the coordinator is waiting for.
+    // Launch the persistent workers the master is waiting for.
     std::vector<pid_t> workerPids;
     for (int i = 0; i < 2; ++i) {
-        workerPids.push_back(startProcess(worker, {"--coordinator", address, "--plugin", plugin}));
+        workerPids.push_back(startProcess(worker, {"--master", address, "--plugin", plugin}));
     }
 
-    const int coordinatorExit = waitProcess(coordinatorPid);
-    check(coordinatorExit == 0, "coordinator should exit 0, got " + std::to_string(coordinatorExit));
+    const int masterExit = waitProcess(masterPid);
+    check(masterExit == 0, "master should exit 0, got " + std::to_string(masterExit));
     for (const pid_t pid : workerPids) {
         check(waitProcess(pid) == 0, "worker should exit 0");
     }

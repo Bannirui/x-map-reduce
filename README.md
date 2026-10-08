@@ -19,7 +19,7 @@ Run from `build/bin`: the binaries, the plugins and the copied `asset/` inputs a
 ```sh
 cd ./build/bin
 
-./x-coordinator --job word_count \
+./x-master --job word_count \
   --plugin ../lib/word_count.so \
   --workers 3 \
   --reducers 3 \
@@ -28,7 +28,7 @@ cd ./build/bin
   asset/wordCount1.txt asset/wordCount2.txt asset/wordCount3.txt
 ```
 
-> only the coordinator needs the input files; workers fetch their splits over TCP.
+> only the master needs the input files; workers fetch their splits over TCP.
 > `--plugin` points at the job's shared object; jobs are no longer compiled in.
 > `--workers 3` withholds all work until exactly 3 workers connect, so start 3.
 
@@ -39,7 +39,7 @@ In another shell (also from `build/bin`):
 ```sh
 cd ./build/bin
 for i in 1 2 3; do
-  ./x-worker --coordinator 127.0.0.1:9527 --plugin ../lib/word_count.so &
+  ./x-worker --master 127.0.0.1:9527 --plugin ../lib/word_count.so &
 done
 wait
 ```
@@ -65,7 +65,7 @@ wait
     - duplicate slow tasks
     - first attempt wins
   - [ ] V5.2 heartbeat liveness
-    - extract worker management into its own class (`WorkerRegistry`: registration, idle/liveness), mirroring how `Scheduler` isolates task scheduling; the coordinator keeps only I/O
+    - extract worker management into its own class (`WorkerRegistry`: registration, idle/liveness), mirroring how `Scheduler` isolates task scheduling; the master keeps only I/O
 - [ ] V6 Job submission—submit arbitrary map/reduce to the master
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface

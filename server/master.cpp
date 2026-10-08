@@ -7,6 +7,7 @@
 #include"runtime/plugin.h"
 #include"runtime/scheduler.h"
 #include"runtime/task.h"
+#include"runtime/task_codec.h"
 
 #include<algorithm>
 #include<cstdint>
@@ -40,27 +41,6 @@ namespace {
         }
         return {endpoint.substr(0, colon),
                 static_cast<std::uint16_t>(std::stoul(endpoint.substr(colon + 1)))};
-    }
-
-    xmr::protocol::WorkKind wireKind(xmr::TaskKind kind) {
-        return kind == xmr::TaskKind::Map ? xmr::protocol::WorkKind::Map : xmr::protocol::WorkKind::Reduce;
-    }
-
-    xmr::TaskKind taskKind(xmr::protocol::WorkKind kind) {
-        return kind == xmr::protocol::WorkKind::Map ? xmr::TaskKind::Map : xmr::TaskKind::Reduce;
-    }
-
-    xmr::protocol::TaskMessage toTaskMessage(const xmr::Task& task) {
-        xmr::protocol::TaskMessage message;
-        message.kind = wireKind(task.kind);
-        message.taskId = task.id;
-        message.job = task.job;
-        message.reducers = task.reducers;
-        message.maps = task.maps;
-        if (task.kind == xmr::TaskKind::Map) {
-            message.input = task.input;
-        }
-        return message;
     }
 
     std::vector<std::uint8_t> toBytes(const std::string& text) {
@@ -206,13 +186,13 @@ int main(int argc, char** argv) {
                 }
                 case xmr::protocol::MessageType::Done: {
                     const auto done = xmr::protocol::Done::decode(frame.body);
-                    scheduler.markDone(taskKind(done.kind));
+                    scheduler.markDone(xmr::taskKind(done.kind));
                     worker.idle = false;
                     break;
                 }
                 case xmr::protocol::MessageType::Fail: {
                     const auto fail = xmr::protocol::Fail::decode(frame.body);
-                    scheduler.markFailed(taskKind(fail.kind), fail.taskId, fail.reason);
+                    scheduler.markFailed(xmr::taskKind(fail.kind), fail.taskId, fail.reason);
                     worker.idle = false;
                     break;
                 }
@@ -319,7 +299,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 // master向worker派发任务
-                const auto message = toTaskMessage(*task);
+                const auto message = xmr::toTaskMessage(*task);
                 sendTo(*worker, xmr::protocol::MessageType::Task, worker->lastRequest, message.encode());
                 worker->idle = false;
             }
@@ -377,11 +357,11 @@ int main(int argc, char** argv) {
                          });
         WriteKeyValues(outputFile, merged);
     } catch (const UsageError& error) {
-        std::cerr << "coordinator: " << error.what() << '\n';
+        std::cerr << "master: " << error.what() << '\n';
         usage(argv[0]);
         return static_cast<int>(ExitCode::Usage);
     } catch (const std::exception& error) {
-        std::cerr << "coordinator: " << error.what() << '\n';
+        std::cerr << "master: " << error.what() << '\n';
         return static_cast<int>(ExitCode::Failure);
     }
 

@@ -21,12 +21,12 @@ add_asset_copy_target("${CMAKE_SOURCE_DIR}/asset")
 
 include(CTest)
 
-add_subdirectory(src)
+add_subdirectory(mapreduce)
 add_subdirectory(net)
 add_subdirectory(protocol)
 add_subdirectory(runtime)
 add_subdirectory(jobs)
-add_subdirectory(apps)
+add_subdirectory(server)
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

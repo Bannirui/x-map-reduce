@@ -5,6 +5,7 @@
 #include"runtime/exit_code.h"
 #include"runtime/plugin.h"
 #include"runtime/task.h"
+#include"runtime/task_codec.h"
 
 #include<cstdint>
 #include<iostream>
@@ -41,56 +42,35 @@ namespace {
         return {endpoint.substr(0, colon), endpoint.substr(colon + 1)};
     }
 
-    xmr::TaskKind taskKind(xmr::protocol::WorkKind kind) {
-        return kind == xmr::protocol::WorkKind::Map ? xmr::TaskKind::Map : xmr::TaskKind::Reduce;
-    }
-
-    xmr::protocol::WorkKind wireKind(xmr::TaskKind kind) {
-        return kind == xmr::TaskKind::Map ? xmr::protocol::WorkKind::Map : xmr::protocol::WorkKind::Reduce;
-    }
-
-    xmr::Task toTask(const xmr::protocol::TaskMessage& message) {
-        xmr::Task task;
-        task.kind = taskKind(message.kind);
-        task.id = message.taskId;
-        task.job = message.job;
-        task.reducers = message.reducers;
-        task.maps = message.maps;
-        if (message.kind == xmr::protocol::WorkKind::Map) {
-            task.input = *message.input;
-        }
-        return task;
-    }
-
     void usage(const char* program) {
-        std::cerr << "Usage: " << program << " --coordinator <host:port> [--plugin <path>]...\n";
+        std::cerr << "Usage: " << program << " --master <host:port> [--plugin <path>]...\n";
     }
 } // namespace
 
 int main(int argc, char** argv) {
     // master的host:port
-    std::string coordinator;
+    std::string master;
     // job的插件
     std::vector<std::string> plugins;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--coordinator" && i + 1 < argc) {
-            coordinator = argv[++i];
+        if (arg == "--master" && i + 1 < argc) {
+            master = argv[++i];
         } else if (arg == "--plugin" && i + 1 < argc) {
             plugins.emplace_back(argv[++i]);
         }
     }
 
     try {
-        if (coordinator.empty()) {
-            throw UsageError("missing --coordinator");
+        if (master.empty()) {
+            throw UsageError("missing --master");
         }
         // 加载job插件
         for (const auto& plugin : plugins) {
             loadJobPlugin(plugin);
         }
-        const auto [host,portText] = parseEndpoint(coordinator);
+        const auto [host,portText] = parseEndpoint(master);
         const std::uint16_t port = static_cast<std::uint16_t>(std::stoul(portText));
         // TCP连接
         xmr::net::Connection connection = xmr::net::connectTo(host, port);
@@ -127,7 +107,7 @@ int main(int argc, char** argv) {
                 } else if (status == xmr::net::IoStatus::WouldBlock) {
                     break;
                 } else {
-                    throw std::runtime_error("coordinator disconnected while sending");
+                    throw std::runtime_error("master disconnected while sending");
                 }
             }
             updateInterest();
@@ -167,7 +147,7 @@ int main(int argc, char** argv) {
 
         auto failTask = [&](const xmr::Task& task, const std::string& reason) {
             xmr::protocol::Fail fail;
-            fail.kind = wireKind(task.kind);
+            fail.kind = xmr::wireKind(task.kind);
             fail.taskId = task.id;
             fail.statusCode = xmr::protocol::StatusCode::Internal;
             fail.reason = reason;
@@ -182,7 +162,7 @@ int main(int argc, char** argv) {
             }
             if (frame.header.type == xmr::protocol::MessageType::Task) {
                 // worker收到master派发的任务
-                current = toTask(xmr::protocol::TaskMessage::decode(frame.body));
+                current = xmr::toTask(xmr::protocol::TaskMessage::decode(frame.body));
                 if (current->kind == xmr::TaskKind::Map) {
                     // worker收到master派发的map任务 跟master要这个map任务的数据
                     xmr::protocol::InputRequest request;
@@ -248,7 +228,7 @@ int main(int argc, char** argv) {
                 }
                 throw std::runtime_error("unexpected DATA reply");
             }
-            throw std::runtime_error("unexpected coordinator message");
+            throw std::runtime_error("unexpected master message");
         };
 
         // 发个探测协议
@@ -287,7 +267,7 @@ int main(int argc, char** argv) {
                         handleFrame(*frame);
                     }
                     if (peerClosed && !stopped) {
-                        throw std::runtime_error("coordinator disconnected");
+                        throw std::runtime_error("master disconnected");
                     }
                 }
             }
