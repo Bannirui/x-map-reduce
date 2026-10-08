@@ -45,6 +45,17 @@ namespace xmr::client {
     }
 
     bool Client::submit(const SubmitRequest& request, std::string& reason) {
+        // 读本地输入文件
+        std::vector<std::vector<std::uint8_t> > inputs;
+        inputs.reserve(request.inputs.size());
+        for (const auto& path : request.inputs) {
+            std::ifstream in(path, std::ios::binary);
+            if (!in) {
+                reason = "failed to open input: " + path;
+                return false;
+            }
+            inputs.emplace_back(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
         // 读本地插件 算出内容哈希
         std::vector<std::uint8_t> plugin;
         if (!request.pluginPath.empty()) {
@@ -85,10 +96,26 @@ namespace xmr::client {
             return false;
         }
 
-        // 插件走数据面单独连接上传
+        // 输入和插件都走数据面单独连接上传
+        net::Connection data = net::connectTo(ack.dataHost, static_cast<std::uint16_t>(ack.dataPort));
+        for (std::size_t index = 0; index < inputs.size(); ++index) {
+            const std::vector<std::uint8_t>& blob = inputs[index];
+            std::size_t offset = 0;
+            do {
+                const std::size_t n = std::min<std::size_t>(protocol::kChunkBytes, blob.size() - offset);
+                protocol::InputBlob chunk;
+                chunk.index = index;
+                chunk.offset = offset;
+                chunk.payload.assign(blob.begin() + static_cast<std::ptrdiff_t>(offset),
+                                     blob.begin() + static_cast<std::ptrdiff_t>(offset + n));
+                const bool more = offset + n < blob.size();
+                const auto frame = protocol::makeFrame(protocol::MessageType::InputBlob, 0, chunk.encode(),
+                                                       more ? static_cast<std::uint16_t>(protocol::Flag::More) : 0);
+                net::sendAll(data.fd(), frame.data(), frame.size());
+                offset += n;
+            } while (offset < blob.size());
+        }
         if (!plugin.empty()) {
-            net::Connection data = net::connectTo(ack.dataHost,
-                                                  static_cast<std::uint16_t>(ack.dataPort));
             std::size_t offset = 0;
             do {
                 const std::size_t n = std::min<std::size_t>(protocol::kChunkBytes, plugin.size() - offset);

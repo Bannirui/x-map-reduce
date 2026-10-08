@@ -272,4 +272,15 @@ namespace xmr::protocol {
 
         static NeedPlugin decode(const std::vector<std::uint8_t>& body);
     };
+
+    // client在数据面把map输入分块传上来
+    struct InputBlob {
+        std::uint64_t index = 0;
+        std::uint64_t offset = 0;
+        std::vector<std::uint8_t> payload;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static InputBlob decode(const std::vector<std::uint8_t>& body);
+    };
 } // namespace xmr::protocol

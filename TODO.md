@@ -56,7 +56,7 @@ TODO
       - [X] worker: `Stop`=本job结束并复位状态(epoch防串)、`Shutdown`=退出；保持连接与心跳
       - [X] master: server启动一次、每job一份coordinator生命周期(等提交->跑->回复->复位)
     - [X] 任务提交client端侧的约定 给跨语言做准备
-    - [X] 输入来源：master本地路径(submitter与master同机/共享盘)；上传输入数据作为后续独立一步
+    - [X] 输入来源：client读本地输入上传数据面，master零FS；worker从数据面拉取
     - [X] 输出去向：master写路径并回复 SubmitResult；流式回传客户端(后)
     - [X] 插件下发：client读本地插件上传字节(分块+内容哈希)，master零FS依赖，按哈希下发给缺的worker
     - [X] Plugin/PluginAck 消息；worker收齐插件后落盘缓存(dlopen前原子rename)+dlopen，再派任务

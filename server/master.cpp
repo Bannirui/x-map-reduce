@@ -172,7 +172,11 @@ namespace {
     private:
         void tick();
 
-        void submitJob(ConnId client, const xmr::protocol::Submit& submit, std::uint32_t requestId);
+        void startJob(ConnId client, const xmr::protocol::Submit& submit,
+                      std::vector<std::string> inputData);
+
+        // 输入+插件都收齐了就开跑
+        void maybeStartJob();
 
         // 把当前job的插件分块发给某个worker 它没有的话
         void sendPlugin(ConnId id);
@@ -219,6 +223,9 @@ namespace {
             std::uint32_t requestId = 0;
         };
         std::optional<Pending> pending_;
+        // client在数据面上传的输入 按index
+        std::vector<std::string> inputUpload_;
+        std::size_t inputDone_ = 0;
         // 按内容哈希存插件二进制
         std::unordered_map<std::string, std::vector<std::uint8_t> > pluginStore_;
         // 当前job的插件哈希 空表示worker本地已预加载
@@ -256,32 +263,8 @@ namespace {
         }
     }
 
-    void Coordinator::submitJob(ConnId client, const xmr::protocol::Submit& submit, std::uint32_t requestId) {
-        auto reject = [&](xmr::protocol::StatusCode code, const std::string& reason) {
-            xmr::protocol::SubmitAck ack;
-            ack.statusCode = code;
-            ack.reason = reason;
-            send(client, xmr::protocol::MessageType::SubmitAck, requestId, ack.encode());
-        };
-
-        if (submit.job.empty() || submit.output.empty() || submit.inputs.empty()
-            || submit.reducers == 0) {
-            reject(xmr::protocol::StatusCode::InvalidArgument, "invalid submit");
-            return;
-        }
-
-        // 现在没有文件系统 master读自己能访问的本地路径
-        std::vector<std::string> inputData;
-        inputData.reserve(submit.inputs.size());
-        for (const auto& path : submit.inputs) {
-            std::ifstream in(path, std::ios::binary);
-            if (!in) {
-                reject(xmr::protocol::StatusCode::NotFound, "failed to open input: " + path);
-                return;
-            }
-            inputData.emplace_back(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-        }
-
+    void Coordinator::startJob(ConnId client, const xmr::protocol::Submit& submit,
+                               std::vector<std::string> inputData) {
         job_ = std::make_unique<JobState>(submit.job, submit.inputs, submit.reducers,
                                           std::move(inputData), submit.output, client);
         mapOwner_.clear();
@@ -298,6 +281,26 @@ namespace {
                 }
             }
         }
+    }
+
+    void Coordinator::maybeStartJob() {
+        if (!pending_) {
+            return;
+        }
+        if (inputDone_ < inputUpload_.size()) {
+            return;
+        }
+        const std::string& hash = pending_->submit.pluginHash;
+        if (!hash.empty() && pluginStore_.find(hash) == pluginStore_.end()) {
+            return;
+        }
+        const ConnId client = pending_->client;
+        const xmr::protocol::Submit submit = pending_->submit;
+        std::vector<std::string> inputData = std::move(inputUpload_);
+        inputUpload_.clear();
+        inputDone_ = 0;
+        pending_.reset();
+        startJob(client, submit, std::move(inputData));
     }
 
     void Coordinator::sendPlugin(ConnId id) {
@@ -362,16 +365,19 @@ namespace {
                     }
                     const auto submit = xmr::protocol::Submit::decode(frame.body);
                     xmr::protocol::SubmitAck ack;
-                    ack.statusCode = xmr::protocol::StatusCode::Ok;
                     ack.dataHost = dataHost_;
                     ack.dataPort = dataPort_;
-                    if (!submit.pluginHash.empty()) {
-                        // 受理 让client先把插件传到数据面再开跑
-                        pending_ = Pending{id, submit, frame.header.requestId};
+                    if (submit.job.empty() || submit.output.empty() || submit.inputs.empty() || submit.reducers == 0) {
+                        ack.statusCode = xmr::protocol::StatusCode::InvalidArgument;
+                        ack.reason = "invalid submit";
                         send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
                         break;
                     }
-                    submitJob(id, submit, frame.header.requestId);
+                    // 受理 等client在数据面把输入(+插件)传完再开跑
+                    pending_ = Pending{id, submit, frame.header.requestId};
+                    inputUpload_.assign(submit.inputs.size(), std::string());
+                    inputDone_ = 0;
+                    ack.statusCode = xmr::protocol::StatusCode::Ok;
                     send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
                     break;
                 }
@@ -400,11 +406,30 @@ namespace {
                     }
                     pluginStore_[chunk.hash] = std::move(conn.uploadBuffer);
                     conn.uploadBuffer.clear();
-                    if (pending_ && pending_->submit.pluginHash == chunk.hash) {
-                        const Pending job = *pending_;
-                        pending_.reset();
-                        submitJob(job.client, job.submit, job.requestId);
+                    maybeStartJob();
+                    break;
+                }
+                case xmr::protocol::MessageType::InputBlob: {
+                    // client在数据面把map输入传上来
+                    if (!pending_) {
+                        break;
                     }
+                    const auto chunk = xmr::protocol::InputBlob::decode(frame.body);
+                    if (chunk.index >= inputUpload_.size()) {
+                        fail("bad input index");
+                        break;
+                    }
+                    std::string& buffer = inputUpload_[chunk.index];
+                    if (chunk.offset != buffer.size()) {
+                        fail("bad input chunk");
+                        break;
+                    }
+                    buffer.append(chunk.payload.begin(), chunk.payload.end());
+                    if ((frame.header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) != 0) {
+                        break;
+                    }
+                    ++inputDone_;
+                    maybeStartJob();
                     break;
                 }
                 case xmr::protocol::MessageType::PullInput: {

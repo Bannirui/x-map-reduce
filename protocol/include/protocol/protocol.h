@@ -48,6 +48,7 @@ namespace xmr::protocol {
         PullPlugin = 24,
         MasterData = 25,
         NeedPlugin = 26,
+        InputBlob = 27,
     };
 
     enum class WireType : std::uint8_t {
@@ -337,6 +338,12 @@ namespace xmr::protocol {
         inline constexpr std::uint16_t kHash = 1;
         inline constexpr std::uint16_t kJob = 2;
     } // namespace needPlugin
+
+    namespace inputBlob {
+        inline constexpr std::uint16_t kIndex = 1;
+        inline constexpr std::uint16_t kOffset = 2;
+        inline constexpr std::uint16_t kPayload = 3;
+    } // namespace inputBlob
 
     // 内容哈希(FNV-1a 64) 十六进制 用作插件的缓存key
     std::string contentHash(const std::vector<std::uint8_t>& data);

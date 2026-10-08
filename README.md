@@ -62,7 +62,8 @@ cd ./build/bin
   asset/wordCount1.txt asset/wordCount2.txt asset/wordCount3.txt
 ```
 
-> only the master needs the input files; workers fetch their splits over TCP.
+> the client reads the input files and uploads them to the master (data plane);
+> workers fetch their splits over TCP. The master does not keep them on disk.
 > `--plugin` is the client's local `.so`; it is uploaded to the master and
 > distributed to the workers (the master does not need it on disk).
 > the master manages workers, so no worker count is needed: it starts once the

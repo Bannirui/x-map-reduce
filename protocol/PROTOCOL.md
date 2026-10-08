@@ -86,6 +86,7 @@ enum class MessageType : uint8_t {
     PullPlugin   = 24,  // worker -> master(data) 拉插件
     MasterData   = 25,  // master -> worker  告知数据面端口
     NeedPlugin   = 26,  // master -> worker  去拉哪个插件
+    InputBlob    = 27,  // client -> master(data) map输入分块
 };
 ```
 

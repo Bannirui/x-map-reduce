@@ -746,4 +746,33 @@ namespace xmr::protocol {
         }
         return message;
     }
+
+    std::vector<std::uint8_t> InputBlob::encode() const {
+        FieldWriter writer;
+        writer.putU64(inputBlob::kIndex, index);
+        writer.putU64(inputBlob::kOffset, offset);
+        writer.putBytes(inputBlob::kPayload, payload);
+        return writer.take();
+    }
+
+    InputBlob InputBlob::decode(const std::vector<std::uint8_t>& body) {
+        InputBlob message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case inputBlob::kIndex:
+                    message.index = reader.asU64();
+                    break;
+                case inputBlob::kOffset:
+                    message.offset = reader.asU64();
+                    break;
+                case inputBlob::kPayload:
+                    message.payload = reader.asBytes();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
 } // namespace xmr::protocol
