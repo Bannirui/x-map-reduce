@@ -21,9 +21,9 @@ TODO
     - first attempt wins
   - [ ] V5.2 heartbeat liveness
     - extract worker management into its own class (`WorkerRegistry`: registration, idle/liveness), mirroring how `Scheduler` isolates task scheduling; the master keeps only I/O
-    - [ ] 定时任务功能 队列+selector
+    - [X] 定时任务功能 队列+selector
       - [X] 小根堆+多个缓存标识逻辑删除
-      - [ ] 打标标识逻辑删除
+      - [X] 打标标识逻辑删除
 - [ ] V6 Job submission—submit arbitrary map/reduce to the master
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface

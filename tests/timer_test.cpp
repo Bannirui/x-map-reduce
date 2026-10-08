@@ -101,6 +101,24 @@ int main() {
         {
             TimerQueue timers;
             int count = 0;
+            TimerQueue::TimerId id = 0;
+            id = timers.addInterval(milliseconds(10), [&] {
+                ++count;
+                if (count == 3) {
+                    timers.cancel(id);
+                }
+            }, t0);
+            timers.fire(t0 + milliseconds(10));
+            timers.fire(t0 + milliseconds(20));
+            timers.fire(t0 + milliseconds(30));
+            check(count == 3, "interval timer can cancel itself from its callback");
+            timers.fire(t0 + milliseconds(100));
+            check(count == 3, "self-cancelled interval timer stays stopped");
+        }
+
+        {
+            TimerQueue timers;
+            int count = 0;
             const auto id = timers.addInterval(milliseconds(100), [&] { ++count; }, t0);
             timers.addAfter(milliseconds(10), [&] { timers.cancel(id); }, t0);
             timers.fire(t0 + milliseconds(10));

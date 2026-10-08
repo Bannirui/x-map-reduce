@@ -13,12 +13,19 @@ namespace xmr::net {
     }
 
     bool TimerQueue::cancel(TimerId id) {
-        if (live_.count(id) == 0 || cancelled_.count(id) != 0) {
-            return false;
+        // 自己删除自己
+        if (current_ != nullptr && current_->id == id) {
+            current_->cancelled = true;
+            return true;
         }
-        // 要出队的任务 缓存起来 惰性处理
-        cancelled_.insert(id);
-        return true;
+        // 遍历队列找到任务打个标
+        for (Timer& timer : heap_) {
+            if (timer.id == id && !timer.cancelled) {
+                timer.cancelled = true;
+                return true;
+            }
+        }
+        return false;
     }
 
     int TimerQueue::timeoutMs(TimePoint now) {
@@ -41,20 +48,23 @@ namespace xmr::net {
                 break;
             }
             // 拿到堆顶的任务
-            const Timer timer = heap_.front();
+            Timer timer = heap_.front();
             std::pop_heap(heap_.begin(), heap_.end(), comp);
             heap_.pop_back();
-            live_.erase(timer.id);
+            current_ = &timer;
             // 执行这个任务
-            timer.callback();
+            try {
+                timer.callback();
+            } catch (...) {
+                current_ = nullptr;
+                throw;
+            }
+            current_ = nullptr;
             // 要确认它是不是周期性的定时任务 如果是周期任务就要重新入队了 再检查下它有没有在执行期间被逻辑删除了
-            const bool selfCancelled = cancelled_.erase(timer.id) != 0;
-            if (!selfCancelled && timer.interval > Duration::zero()) {
-                Timer next = timer;
-                next.deadline = now + timer.interval;
-                heap_.push_back(next);
+            if (timer.interval > Duration::zero() && !timer.cancelled) {
+                timer.deadline = now + timer.interval;
+                heap_.push_back(timer);
                 std::push_heap(heap_.begin(), heap_.end(), comp);
-                live_.insert(next.id);
             }
         }
     }
@@ -62,18 +72,14 @@ namespace xmr::net {
     TimerQueue::TimerId TimerQueue::add(TimePoint deadline, Duration interval, Callback callback) {
         const TimerId id = nextId_++;
         // push_heap算法要求先把入队元素放到末尾
-        heap_.push_back(Timer{id, deadline, interval, std::move(callback)});
+        heap_.push_back(Timer{id, deadline, interval, std::move(callback), false});
         // 保证小根堆的特性 到期时间
         std::push_heap(heap_.begin(), heap_.end(), comp);
-        // 活跃任务
-        live_.insert(id);
         return id;
     }
 
     void TimerQueue::dropCancelledTop() {
-        while (!heap_.empty() && cancelled_.count(heap_.front().id) != 0) {
-            live_.erase(heap_.front().id);
-            cancelled_.erase(heap_.front().id);
+        while (!heap_.empty() && heap_.front().cancelled) {
             std::pop_heap(heap_.begin(), heap_.end(), comp);
             heap_.pop_back();
         }
