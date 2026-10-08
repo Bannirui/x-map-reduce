@@ -37,7 +37,6 @@ namespace {
     enum class Stage {
         RequestTask,
         WaitingTask,
-        WaitingInput,
         Computing,
     };
 
@@ -61,24 +60,21 @@ namespace {
     }
 
     void usage(const char* program) {
-        std::cerr << "Usage: " << program << " --master <host:port> [--plugin <path>]...\n";
+        std::cerr << "Usage: " << program << " --master <host:port> [--plugin <path>]... [--plugin-cache <dir>]\n";
     }
 
-    // 从另一个worker拉某个map任务的分区结果 阻塞调用 只在线程池里跑
-    std::vector<KeyValue> pullPartition(const std::string& host, std::uint16_t port,
-                                        std::size_t mapTask, std::size_t partition) {
+    // 向某个地址发一个请求 流式收Data直到最后一块 返回blob 阻塞调用 只在线程池里跑
+    std::string pullStream(const std::string& host, std::uint16_t port,
+                           xmr::protocol::MessageType type, const std::vector<std::uint8_t>& body) {
         xmr::net::Connection connection = xmr::net::connectTo(host, port);
-        xmr::protocol::Pull pull;
-        pull.mapTask = mapTask;
-        pull.partition = partition;
-        const auto request = xmr::protocol::makeFrame(xmr::protocol::MessageType::Pull, 1, pull.encode());
+        const auto request = xmr::protocol::makeFrame(type, 1, body);
         xmr::net::sendAll(connection.fd(), request.data(), request.size());
 
         xmr::net::ByteBuffer in;
         std::string blob;
         while (true) {
             if (xmr::net::recvInto(connection.fd(), in) == xmr::net::IoStatus::Closed) {
-                throw std::runtime_error("pull peer closed");
+                return blob;
             }
             xmr::protocol::FrameDecoder decoder(in);
             while (auto frame = decoder.next()) {
@@ -88,10 +84,19 @@ namespace {
                 const auto data = xmr::protocol::DataMessage::decode(frame->body);
                 blob.append(data.payload.begin(), data.payload.end());
                 if ((frame->header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) == 0) {
-                    return xmr::deserializeKeyValues(blob);
+                    return blob;
                 }
             }
         }
+    }
+
+    // 从另一个worker拉某个map任务的分区结果
+    std::vector<KeyValue> pullPartition(const std::string& host, std::uint16_t port,
+                                        std::size_t mapTask, std::size_t partition) {
+        xmr::protocol::Pull pull;
+        pull.mapTask = mapTask;
+        pull.partition = partition;
+        return xmr::deserializeKeyValues(pullStream(host, port, xmr::protocol::MessageType::Pull, pull.encode()));
     }
 
     // 响应另一个worker的拉取请求 阻塞调用 只在线程池里跑
@@ -149,6 +154,33 @@ namespace {
         location.host = text.substr(first + 1, second - first - 1);
         location.port = static_cast<std::uint16_t>(std::stoul(text.substr(second + 1)));
         return location;
+    }
+
+    // 把插件字节落盘缓存(原子rename)并dlopen 返回是否成功
+    bool installPlugin(const std::string& cacheDir, const std::string& hash,
+                       const std::string& job, const std::string& bytes, std::string& reason) {
+        try {
+            const std::string path = cacheDir + "/" + hash + ".so";
+            const std::string tmp = path + ".tmp-" + std::to_string(::getpid());
+            {
+                std::ofstream out(tmp, std::ios::binary);
+                out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            }
+            std::error_code renameError;
+            std::filesystem::rename(tmp, path, renameError);
+            if (renameError) {
+                std::filesystem::remove(tmp, renameError);
+            }
+            loadJobPlugin(path);
+            if (findJob(job) == nullptr) {
+                reason = "plugin does not provide job '" + job + "'";
+                return false;
+            }
+            return true;
+        } catch (const std::exception& error) {
+            reason = error.what();
+            return false;
+        }
     }
 } // namespace
 
@@ -216,18 +248,16 @@ int main(int argc, char** argv) {
         std::uint32_t requestId = 0;
         Stage stage = Stage::RequestTask;
         std::optional<xmr::Task> current;
-        std::unordered_map<std::uint32_t, std::string> incoming;
-        // 运行期下发插件的接收缓冲 按hash聚合
-        std::unordered_map<std::string, std::string> pluginIncoming;
         bool running = true;
         // job代号 换job后自增 用来丢弃上一个job迟到的计算结果
         std::uint64_t epoch = 0;
+        // master数据面地址 由master通过MasterData告知
+        std::uint16_t masterDataPort = 0;
 
         // 复位本次job的状态 准备接下一个job
         auto resetJob = [&] {
             ++epoch;
             current.reset();
-            incoming.clear();
             {
                 std::lock_guard<std::mutex> lock(mapStoreMutex);
                 mapStore.clear();
@@ -318,12 +348,18 @@ int main(int argc, char** argv) {
             sendFrame(xmr::protocol::MessageType::Done, 0, done.encode());
         };
 
-        // 收到map任务输入后 在线程池里跑map 结果留在本地并上报Done
-        auto startMap = [&](const xmr::Task& task, std::string content) {
+        // 收到map任务 在线程池里从master数据面拉输入 跑map 结果留在本地并上报Done
+        auto startMap = [&](const xmr::Task& task) {
             const std::uint64_t job = epoch;
-            pool.submit([&, task, content = std::move(content), job] {
+            const std::string dataHost = host;
+            const std::uint16_t dataPort = masterDataPort;
+            pool.submit([&, task, job, dataHost, dataPort] {
                 std::vector<std::vector<KeyValue> > parts;
                 try {
+                    xmr::protocol::PullInput request;
+                    request.taskId = task.id;
+                    const std::string content = pullStream(dataHost, dataPort,
+                                                           xmr::protocol::MessageType::PullInput, request.encode());
                     parts = xmr::runMapTask(task, content);
                 } catch (const std::exception& error) {
                     const std::string reason = error.what();
@@ -393,6 +429,39 @@ int main(int argc, char** argv) {
             });
         };
 
+        // master让去拉插件 线程池里从master数据面拉下来落盘dlopen 再ack
+        auto needPlugin = [&](const xmr::protocol::NeedPlugin& need) {
+            const std::string dataHost = host;
+            const std::uint16_t dataPort = masterDataPort;
+            const std::string cacheDir = pluginCache;
+            pool.submit([&, need, dataHost, dataPort, cacheDir] {
+                bool ok = true;
+                std::string reason;
+                try {
+                    xmr::protocol::PullPlugin request;
+                    request.hash = need.hash;
+                    const std::string bytes = pullStream(dataHost, dataPort,
+                                                         xmr::protocol::MessageType::PullPlugin, request.encode());
+                    if (bytes.empty()) {
+                        ok = false;
+                        reason = "empty plugin";
+                    } else {
+                        ok = installPlugin(cacheDir, need.hash, need.job, bytes, reason);
+                    }
+                } catch (const std::exception& error) {
+                    ok = false;
+                    reason = error.what();
+                }
+                post([&, need, ok, reason] {
+                    xmr::protocol::PluginAck ack;
+                    ack.hash = need.hash;
+                    ack.ok = ok;
+                    ack.reason = reason;
+                    sendFrame(xmr::protocol::MessageType::PluginAck, 0, ack.encode());
+                });
+            });
+        };
+
         auto handleFrame = [&](const xmr::protocol::Frame& frame) {
             if (frame.header.type == xmr::protocol::MessageType::Stop) {
                 // master告诉worker本job结束了 复位状态准备接下一个job
@@ -408,48 +477,13 @@ int main(int argc, char** argv) {
                 // master对心跳的应答 暂时不需要处理
                 return;
             }
-            if (frame.header.type == xmr::protocol::MessageType::Plugin) {
-                // master下发插件字节 落盘缓存后dlopen
-                const auto chunk = xmr::protocol::Plugin::decode(frame.body);
-                std::string& buffer = pluginIncoming[chunk.hash];
-                if (chunk.offset != buffer.size()) {
-                    throw std::runtime_error("out of order PLUGIN chunk");
-                }
-                buffer.append(chunk.payload.begin(), chunk.payload.end());
-                if ((frame.header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) != 0) {
-                    return;
-                }
-                const std::string bytes = std::move(buffer);
-                pluginIncoming.erase(chunk.hash);
-                bool ok = true;
-                std::string reason;
-                try {
-                    const std::string path = pluginCache + "/" + chunk.hash + ".so";
-                    // 先写临时文件再原子rename 避免多个worker并发写同一个缓存文件
-                    const std::string tmp = path + ".tmp-" + std::to_string(::getpid());
-                    {
-                        std::ofstream out(tmp, std::ios::binary);
-                        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-                    }
-                    std::error_code renameError;
-                    std::filesystem::rename(tmp, path, renameError);
-                    if (renameError) {
-                        std::filesystem::remove(tmp, renameError);
-                    }
-                    loadJobPlugin(path);
-                    if (findJob(chunk.job) == nullptr) {
-                        ok = false;
-                        reason = "plugin does not provide job '" + chunk.job + "'";
-                    }
-                } catch (const std::exception& error) {
-                    ok = false;
-                    reason = error.what();
-                }
-                xmr::protocol::PluginAck ack;
-                ack.hash = chunk.hash;
-                ack.ok = ok;
-                ack.reason = reason;
-                sendFrame(xmr::protocol::MessageType::PluginAck, 0, ack.encode());
+            if (frame.header.type == xmr::protocol::MessageType::MasterData) {
+                // master数据面端口
+                masterDataPort = static_cast<std::uint16_t>(xmr::protocol::MasterData::decode(frame.body).port);
+                return;
+            }
+            if (frame.header.type == xmr::protocol::MessageType::NeedPlugin) {
+                needPlugin(xmr::protocol::NeedPlugin::decode(frame.body));
                 return;
             }
             if (frame.header.type == xmr::protocol::MessageType::Task) {
@@ -457,13 +491,12 @@ int main(int argc, char** argv) {
                 const auto message = xmr::protocol::TaskMessage::decode(frame.body);
                 current = xmr::toTask(message);
                 if (current->kind == xmr::TaskKind::Map) {
-                    // worker收到master派发的map任务 跟master要这个map任务的数据
-                    xmr::protocol::InputRequest request;
-                    request.taskId = current->id;
-                    sendFrame(xmr::protocol::MessageType::InputRequest, ++requestId, request.encode());
-                    stage = Stage::WaitingInput;
+                    const xmr::Task task = *current;
+                    current.reset();
+                    stage = Stage::Computing;
+                    startMap(task);
                 } else {
-                    // worker收到master派发的reduce任务 附带"去哪些worker拉"的计划
+                    // reduce任务附带"去哪些worker拉"的计划
                     std::vector<Location> locations;
                     locations.reserve(message.locations.size());
                     for (const auto& text : message.locations) {
@@ -474,27 +507,6 @@ int main(int argc, char** argv) {
                     stage = Stage::Computing;
                     startReduce(task, std::move(locations));
                 }
-                return;
-            }
-            if (frame.header.type == xmr::protocol::MessageType::Data) {
-                const auto data = xmr::protocol::DataMessage::decode(frame.body);
-                std::string& buffer = incoming[frame.header.requestId];
-                if (data.offset != buffer.size()) {
-                    throw std::runtime_error("out of order DATA chunk");
-                }
-                buffer.append(data.payload.begin(), data.payload.end());
-                if ((frame.header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) != 0) {
-                    return;
-                }
-                std::string payload = std::move(buffer);
-                incoming.erase(frame.header.requestId);
-                if (stage != Stage::WaitingInput) {
-                    throw std::runtime_error("unexpected DATA reply");
-                }
-                const xmr::Task task = *current;
-                current.reset();
-                stage = Stage::Computing;
-                startMap(task, std::move(payload));
                 return;
             }
             throw std::runtime_error("unexpected master message");

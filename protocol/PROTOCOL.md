@@ -82,6 +82,10 @@ enum class MessageType : uint8_t {
     DataAddress  = 20,  // worker -> master  上报数据面监听端口
     Plugin       = 21,  // client -> master / master -> worker  插件二进制分块
     PluginAck    = 22,  // worker -> master  插件加载结果
+    PullInput    = 23,  // worker -> master(data) 拉map输入
+    PullPlugin   = 24,  // worker -> master(data) 拉插件
+    MasterData   = 25,  // master -> worker  告知数据面端口
+    NeedPlugin   = 26,  // master -> worker  去拉哪个插件
 };
 ```
 

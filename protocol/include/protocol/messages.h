@@ -177,6 +177,9 @@ namespace xmr::protocol {
     struct SubmitAck {
         StatusCode statusCode = StatusCode::Ok;
         std::string reason;
+        // master的数据面地址 供client上传插件
+        std::string dataHost;
+        std::uint64_t dataPort = 0;
 
         std::vector<std::uint8_t> encode() const;
 
@@ -232,5 +235,42 @@ namespace xmr::protocol {
         std::vector<std::uint8_t> encode() const;
 
         static PluginAck decode(const std::vector<std::uint8_t>& body);
+    };
+
+    // worker从master数据面拉map输入
+    struct PullInput {
+        std::uint64_t taskId = 0;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static PullInput decode(const std::vector<std::uint8_t>& body);
+    };
+
+    // worker从master数据面拉插件
+    struct PullPlugin {
+        std::string hash;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static PullPlugin decode(const std::vector<std::uint8_t>& body);
+    };
+
+    // master把自己的数据面监听端口告诉worker
+    struct MasterData {
+        std::uint64_t port = 0;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static MasterData decode(const std::vector<std::uint8_t>& body);
+    };
+
+    // master告诉worker去拉哪个插件
+    struct NeedPlugin {
+        std::string hash;
+        std::string job;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static NeedPlugin decode(const std::vector<std::uint8_t>& body);
     };
 } // namespace xmr::protocol

@@ -207,12 +207,16 @@ namespace xmr::protocol {
             case MessageType::DataAddress: return "DATA_ADDRESS";
             case MessageType::Plugin: return "PLUGIN";
             case MessageType::PluginAck: return "PLUGIN_ACK";
+            case MessageType::PullInput: return "PULL_INPUT";
+            case MessageType::PullPlugin: return "PULL_PLUGIN";
+            case MessageType::MasterData: return "MASTER_DATA";
+            case MessageType::NeedPlugin: return "NEED_PLUGIN";
         }
         return "UNKNOWN";
     }
 
     std::optional<MessageType> parseMessageType(std::string_view name) {
-        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::PluginAck); ++raw) {
+        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::NeedPlugin); ++raw) {
             const auto type = static_cast<MessageType>(raw);
             if (messageTypeName(type) == name) {
                 return type;

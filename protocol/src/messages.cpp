@@ -513,6 +513,8 @@ namespace xmr::protocol {
         FieldWriter writer;
         writer.putU64(submitAck::kStatusCode, static_cast<std::uint64_t>(statusCode));
         writer.putString(submitAck::kReason, reason);
+        writer.putString(submitAck::kDataHost, dataHost);
+        writer.putU64(submitAck::kDataPort, dataPort);
         return writer.take();
     }
 
@@ -526,6 +528,12 @@ namespace xmr::protocol {
                     break;
                 case submitAck::kReason:
                     message.reason = reader.asString();
+                    break;
+                case submitAck::kDataHost:
+                    message.dataHost = reader.asString();
+                    break;
+                case submitAck::kDataPort:
+                    message.dataPort = reader.asU64();
                     break;
                 default:
                     break;
@@ -659,6 +667,82 @@ namespace xmr::protocol {
                     break;
                 case pluginAck::kReason:
                     message.reason = reader.asString();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> PullInput::encode() const {
+        FieldWriter writer;
+        writer.putU64(pullInput::kTaskId, taskId);
+        return writer.take();
+    }
+
+    PullInput PullInput::decode(const std::vector<std::uint8_t>& body) {
+        PullInput message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            if (reader.id() == pullInput::kTaskId) {
+                message.taskId = reader.asU64();
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> PullPlugin::encode() const {
+        FieldWriter writer;
+        writer.putString(pullPlugin::kHash, hash);
+        return writer.take();
+    }
+
+    PullPlugin PullPlugin::decode(const std::vector<std::uint8_t>& body) {
+        PullPlugin message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            if (reader.id() == pullPlugin::kHash) {
+                message.hash = reader.asString();
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> MasterData::encode() const {
+        FieldWriter writer;
+        writer.putU64(masterData::kPort, port);
+        return writer.take();
+    }
+
+    MasterData MasterData::decode(const std::vector<std::uint8_t>& body) {
+        MasterData message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            if (reader.id() == masterData::kPort) {
+                message.port = reader.asU64();
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> NeedPlugin::encode() const {
+        FieldWriter writer;
+        writer.putString(needPlugin::kHash, hash);
+        writer.putString(needPlugin::kJob, job);
+        return writer.take();
+    }
+
+    NeedPlugin NeedPlugin::decode(const std::vector<std::uint8_t>& body) {
+        NeedPlugin message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case needPlugin::kHash:
+                    message.hash = reader.asString();
+                    break;
+                case needPlugin::kJob:
+                    message.job = reader.asString();
                     break;
                 default:
                     break;

@@ -67,8 +67,29 @@ namespace xmr::client {
         }
         send(protocol::MessageType::Submit, 1, submit.encode());
 
-        // 上传插件字节 分块
+        // 等master受理 它会把数据面地址带回来
+        protocol::SubmitAck ack;
+        while (true) {
+            const protocol::Frame frame = receive();
+            if (frame.header.type == protocol::MessageType::SubmitAck) {
+                ack = protocol::SubmitAck::decode(frame.body);
+                break;
+            }
+            if (frame.header.type == protocol::MessageType::SubmitResult) {
+                const auto result = protocol::SubmitResult::decode(frame.body);
+                reason = result.reason;
+                return result.statusCode == protocol::StatusCode::Ok;
+            }
+        }
+        if (ack.statusCode != protocol::StatusCode::Ok) {
+            reason = ack.reason;
+            return false;
+        }
+
+        // 插件走数据面单独连接上传
         if (!plugin.empty()) {
+            net::Connection data = net::connectTo(ack.dataHost,
+                                                  static_cast<std::uint16_t>(ack.dataPort));
             std::size_t offset = 0;
             do {
                 const std::size_t n = std::min<std::size_t>(protocol::kChunkBytes, plugin.size() - offset);
@@ -79,25 +100,13 @@ namespace xmr::client {
                 chunk.payload.assign(plugin.begin() + static_cast<std::ptrdiff_t>(offset),
                                      plugin.begin() + static_cast<std::ptrdiff_t>(offset + n));
                 const bool more = offset + n < plugin.size();
-                send(protocol::MessageType::Plugin, 0, chunk.encode(),
-                     more ? static_cast<std::uint16_t>(protocol::Flag::More) : 0);
+                const auto frame = protocol::makeFrame(protocol::MessageType::Plugin, 0, chunk.encode(),
+                                                       more ? static_cast<std::uint16_t>(protocol::Flag::More) : 0);
+                net::sendAll(data.fd(), frame.data(), frame.size());
                 offset += n;
             } while (offset < plugin.size());
         }
-
-        while (true) {
-            const protocol::Frame frame = receive();
-            if (frame.header.type == protocol::MessageType::SubmitAck) {
-                const auto ack = protocol::SubmitAck::decode(frame.body);
-                reason = ack.reason;
-                return ack.statusCode == protocol::StatusCode::Ok;
-            }
-            if (frame.header.type == protocol::MessageType::SubmitResult) {
-                const auto result = protocol::SubmitResult::decode(frame.body);
-                reason = result.reason;
-                return result.statusCode == protocol::StatusCode::Ok;
-            }
-        }
+        return true;
     }
 
     SubmitResult Client::wait() {

@@ -44,7 +44,7 @@ TODO
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface
     - worker loads `job.so` with `dlopen`
-  - [ ] V6.1 用户提交任务给master master负责下发动态库给worker
+  - [X] V6.1 用户提交任务给master master负责下发动态库给worker
     - [X] 前置：控制面/数据面拆分(master只管元数据)
       - [X] 定位：master只做元数据与调度(提交、注册、心跳、派任务)，shuffle等大数据不再走master
       - [X] 控制面：client<->master、worker<->master的小消息(Submit/Hello/Ping/Task/Done/Fail)
@@ -52,7 +52,7 @@ TODO
       - [X] worker开自己的数据listener供其它worker拉数据，注册时把端口报给master
       - [X] map结果只留在map worker本地，master只记mapTask -> worker
       - [X] map worker在reduce拉取前死掉会导致中间结果丢失 作废其名下完成的map并重跑
-    - [ ] 前置：常驻化 master/worker(while 循环服务，不再一个job就退出)
+    - [X] 前置：常驻化 master/worker(while 循环服务，不再一个job就退出)
       - [X] worker: `Stop`=本job结束并复位状态(epoch防串)、`Shutdown`=退出；保持连接与心跳
       - [X] master: server启动一次、每job一份coordinator生命周期(等提交->跑->回复->复位)
     - [X] 任务提交client端侧的约定 给跨语言做准备
@@ -61,7 +61,7 @@ TODO
     - [X] 插件下发：client读本地插件上传字节(分块+内容哈希)，master零FS依赖，按哈希下发给缺的worker
     - [X] Plugin/PluginAck 消息；worker收齐插件后落盘缓存(dlopen前原子rename)+dlopen，再派任务
     - [X] 插件按内容哈希缓存 worker本地跨job复用(已加载不再重发)
-    - [ ] 插件/输入等bulk目前走控制连接(分块)，后续移到数据面(master开data listener供client上传/worker拉取)
+    - [X] 插件/输入等bulk走数据面：master开data listener，client上传插件、worker拉插件/输入；控制面只留小消息
   - [ ] V6.2 任务提交支持跨语言 这个要针对不同语言开发sdk 难度太大
 - [ ] V7 HA cluster master
   - [X] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)

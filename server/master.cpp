@@ -67,6 +67,8 @@ namespace {
         std::uint32_t lastRequest = 0;
         // 这个worker已经加载过的插件哈希
         std::unordered_set<std::string> plugins;
+        // 数据连接上client上传插件的接收缓冲 coordinator线程独占
+        std::vector<std::uint8_t> uploadBuffer;
         // worker reactor线程独占
         bool broken = false;
     };
@@ -136,6 +138,11 @@ namespace {
 
         void setOnShutdown(std::function<void()> onShutdown) {
             onShutdown_ = std::move(onShutdown);
+        }
+
+        void setDataAddress(std::string host, std::uint16_t port) {
+            dataHost_ = std::move(host);
+            dataPort_ = port;
         }
 
         void start() {
@@ -212,14 +219,15 @@ namespace {
             std::uint32_t requestId = 0;
         };
         std::optional<Pending> pending_;
-        // 插件字节的接收缓冲
-        std::vector<std::uint8_t> uploadBuffer_;
         // 按内容哈希存插件二进制
         std::unordered_map<std::string, std::vector<std::uint8_t> > pluginStore_;
         // 当前job的插件哈希 空表示worker本地已预加载
         std::string pluginHash_;
         // 已经加载当前插件的worker数
         std::size_t pluginReady_ = 0;
+        // master数据面地址 供client上传/worker拉取
+        std::string dataHost_;
+        std::uint16_t dataPort_ = 0;
         std::unique_ptr<JobState> job_;
         std::atomic<bool> stopping_{false};
         std::string error_;
@@ -290,35 +298,17 @@ namespace {
                 }
             }
         }
-
-        xmr::protocol::SubmitAck ack;
-        ack.statusCode = xmr::protocol::StatusCode::Ok;
-        send(client, xmr::protocol::MessageType::SubmitAck, requestId, ack.encode());
     }
 
     void Coordinator::sendPlugin(ConnId id) {
-        if (pluginHash_.empty()) {
+        // 让worker自己去master数据面拉插件
+        if (pluginHash_.empty() || !job_) {
             return;
         }
-        const auto bytes = pluginStore_.find(pluginHash_);
-        if (bytes == pluginStore_.end()) {
-            return;
-        }
-        const std::vector<std::uint8_t>& plugin = bytes->second;
-        std::size_t offset = 0;
-        do {
-            const std::size_t n = std::min<std::size_t>(xmr::protocol::kChunkBytes, plugin.size() - offset);
-            xmr::protocol::Plugin chunk;
-            chunk.hash = pluginHash_;
-            chunk.job = job_ ? job_->name : "";
-            chunk.offset = offset;
-            chunk.payload.assign(plugin.begin() + static_cast<std::ptrdiff_t>(offset),
-                                 plugin.begin() + static_cast<std::ptrdiff_t>(offset + n));
-            const bool more = offset + n < plugin.size();
-            send(id, xmr::protocol::MessageType::Plugin, 0, chunk.encode(),
-                 more ? static_cast<std::uint16_t>(xmr::protocol::Flag::More) : 0);
-            offset += n;
-        } while (offset < plugin.size());
+        xmr::protocol::NeedPlugin need;
+        need.hash = pluginHash_;
+        need.job = job_->name;
+        send(id, xmr::protocol::MessageType::NeedPlugin, 0, need.encode());
     }
 
     void Coordinator::finishJob() {
@@ -371,43 +361,72 @@ namespace {
                         break;
                     }
                     const auto submit = xmr::protocol::Submit::decode(frame.body);
+                    xmr::protocol::SubmitAck ack;
+                    ack.statusCode = xmr::protocol::StatusCode::Ok;
+                    ack.dataHost = dataHost_;
+                    ack.dataPort = dataPort_;
                     if (!submit.pluginHash.empty()) {
-                        // 先等插件字节上传完 再开跑
+                        // 受理 让client先把插件传到数据面再开跑
                         pending_ = Pending{id, submit, frame.header.requestId};
-                        uploadBuffer_.clear();
+                        send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
                         break;
                     }
                     submitJob(id, submit, frame.header.requestId);
+                    send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
                     break;
                 }
                 case xmr::protocol::MessageType::Plugin: {
-                    // client上传插件字节
-                    if (!pending_ || pending_->client != id) {
-                        break;
-                    }
+                    // client在数据面把插件字节传上来
                     const auto chunk = xmr::protocol::Plugin::decode(frame.body);
-                    if (chunk.hash != pending_->submit.pluginHash || chunk.offset != uploadBuffer_.size()) {
+                    if (chunk.offset != conn.uploadBuffer.size()) {
                         fail("bad plugin upload");
                         break;
                     }
-                    uploadBuffer_.insert(uploadBuffer_.end(), chunk.payload.begin(), chunk.payload.end());
+                    conn.uploadBuffer.insert(conn.uploadBuffer.end(), chunk.payload.begin(), chunk.payload.end());
                     if ((frame.header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) != 0) {
                         break;
                     }
-                    if (xmr::protocol::contentHash(uploadBuffer_) != pending_->submit.pluginHash) {
-                        xmr::protocol::SubmitAck ack;
-                        ack.statusCode = xmr::protocol::StatusCode::Internal;
-                        ack.reason = "plugin hash mismatch";
-                        send(pending_->client, xmr::protocol::MessageType::SubmitAck, pending_->requestId, ack.encode());
-                        pending_.reset();
-                        uploadBuffer_.clear();
+                    if (xmr::protocol::contentHash(conn.uploadBuffer) != chunk.hash) {
+                        if (pending_ && pending_->submit.pluginHash == chunk.hash) {
+                            xmr::protocol::SubmitAck error;
+                            error.statusCode = xmr::protocol::StatusCode::Internal;
+                            error.reason = "plugin hash mismatch";
+                            send(pending_->client, xmr::protocol::MessageType::SubmitAck,
+                                 pending_->requestId, error.encode());
+                            pending_.reset();
+                        }
+                        conn.uploadBuffer.clear();
                         break;
                     }
-                    pluginStore_[pending_->submit.pluginHash] = uploadBuffer_;
-                    const Pending job = *pending_;
-                    pending_.reset();
-                    uploadBuffer_.clear();
-                    submitJob(job.client, job.submit, job.requestId);
+                    pluginStore_[chunk.hash] = std::move(conn.uploadBuffer);
+                    conn.uploadBuffer.clear();
+                    if (pending_ && pending_->submit.pluginHash == chunk.hash) {
+                        const Pending job = *pending_;
+                        pending_.reset();
+                        submitJob(job.client, job.submit, job.requestId);
+                    }
+                    break;
+                }
+                case xmr::protocol::MessageType::PullInput: {
+                    if (!job_) {
+                        break;
+                    }
+                    // worker从数据面拉map输入
+                    const auto request = xmr::protocol::PullInput::decode(frame.body);
+                    if (request.taskId >= job_->inputData.size()) {
+                        throw std::runtime_error("INPUT out of range");
+                    }
+                    sendBlob(id, frame.header.requestId, job_->inputData[request.taskId]);
+                    break;
+                }
+                case xmr::protocol::MessageType::PullPlugin: {
+                    // worker从数据面拉插件
+                    const auto request = xmr::protocol::PullPlugin::decode(frame.body);
+                    const auto it = pluginStore_.find(request.hash);
+                    if (it != pluginStore_.end()) {
+                        const std::string blob(it->second.begin(), it->second.end());
+                        sendBlob(id, frame.header.requestId, blob);
+                    }
                     break;
                 }
                 case xmr::protocol::MessageType::PluginAck: {
@@ -435,6 +454,12 @@ namespace {
                     conn.workerId = xmr::protocol::Hello::decode(frame.body).workerId;
                     registry_.add(conn.workerId, std::chrono::steady_clock::now());
                     byWorker_[conn.workerId] = id;
+                    {
+                        // 告诉worker master数据面端口 供它拉输入/插件
+                        xmr::protocol::MasterData data;
+                        data.port = dataPort_;
+                        send(id, xmr::protocol::MessageType::MasterData, 0, data.encode());
+                    }
                     if (job_ && !pluginHash_.empty() && conn.plugins.count(pluginHash_) == 0) {
                         sendPlugin(id);
                     }
@@ -479,18 +504,6 @@ namespace {
                         retryOrFail(*held);
                     }
                     registry_.complete(conn.workerId);
-                    break;
-                }
-                case xmr::protocol::MessageType::InputRequest: {
-                    if (!job_) {
-                        break;
-                    }
-                    // worker准备执行map函数了 跟master要map需要的文件数据
-                    const auto request = xmr::protocol::InputRequest::decode(frame.body);
-                    if (request.taskId >= job_->inputData.size()) {
-                        throw std::runtime_error("INPUT out of range");
-                    }
-                    sendBlob(id, frame.header.requestId, job_->inputData[request.taskId]);
                     break;
                 }
                 case xmr::protocol::MessageType::Result: {
@@ -758,6 +771,11 @@ int main(int argc, char** argv) {
         xmr::net::setNonBlocking(listener.fd());
         std::cout << "LISTENING " << host << ":" << listener.port() << std::endl;
 
+        // 数据面 listener: worker拉输入/插件 client上传插件
+        xmr::net::Listener dataListener(host, 0);
+        xmr::net::setNonBlocking(dataListener.fd());
+        std::cout << "DATA_LISTENING " << host << ":" << dataListener.port() << std::endl;
+
         Coordinator coordinator;
         xmr::net::EventLoopGroup ioGroup(kIoThreads);
         xmr::net::EventLoop coordinatorLoop;
@@ -768,6 +786,7 @@ int main(int argc, char** argv) {
         std::future<void> doneFuture = donePromise.get_future();
         coordinator.setOnShutdown([&donePromise] { donePromise.set_value(); });
         coordinator.setLoop(&coordinatorLoop);
+        coordinator.setDataAddress(host, dataListener.port());
 
         std::thread coordinatorThread([&] { coordinatorLoop.run(); });
         ioGroup.start();
@@ -775,11 +794,11 @@ int main(int argc, char** argv) {
 
         coordinatorLoop.runInLoop([&] { coordinator.start(); });
 
-        auto acceptHandler = [&](std::uint32_t) {
+        auto acceptFrom = [&](xmr::net::Listener& acceptor) {
             try {
                 while (true) {
                     xmr::net::Connection connection;
-                    const xmr::net::IoStatus status = listener.acceptNonBlocking(connection);
+                    const xmr::net::IoStatus status = acceptor.acceptNonBlocking(connection);
                     if (status == xmr::net::IoStatus::WouldBlock) {
                         break;
                     }
@@ -804,7 +823,8 @@ int main(int argc, char** argv) {
             }
         };
         bossLoop.runInLoop([&] {
-            bossLoop.add(listener.fd(), xmr::net::kReadable, acceptHandler);
+            bossLoop.add(listener.fd(), xmr::net::kReadable, [&](std::uint32_t) { acceptFrom(listener); });
+            bossLoop.add(dataListener.fd(), xmr::net::kReadable, [&](std::uint32_t) { acceptFrom(dataListener); });
         });
 
         doneFuture.wait();
