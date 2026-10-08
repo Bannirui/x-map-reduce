@@ -17,6 +17,8 @@ namespace xmr::protocol {
     inline constexpr std::size_t kHeaderSize = 16;
     // 约定一次消息传的大小上限64MB
     inline constexpr std::uint32_t kMaxPayloadBytes = 64u * 1024u * 1024u;
+    // 发送大blob时每块的大小 配合flags.More+offset做流式分块
+    inline constexpr std::uint32_t kChunkBytes = 1u << 20;
 
     // 消息类型
     enum class MessageType : std::uint8_t {

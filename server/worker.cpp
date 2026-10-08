@@ -10,6 +10,7 @@
 #include"runtime/task.h"
 #include"runtime/task_codec.h"
 
+#include<algorithm>
 #include<chrono>
 #include<cstdint>
 #include<functional>
@@ -40,10 +41,6 @@ namespace {
 
     std::vector<std::uint8_t> toBytes(const std::string& text) {
         return std::vector<std::uint8_t>(text.begin(), text.end());
-    }
-
-    std::string toString(const std::vector<std::uint8_t>& bytes) {
-        return std::string(bytes.begin(), bytes.end());
     }
 
     std::pair<std::string, std::string> parseEndpoint(const std::string& endpoint) {
@@ -105,6 +102,8 @@ int main(int argc, char** argv) {
         std::optional<xmr::Task> current;
         std::vector<std::vector<KeyValue> > fetched;
         std::unordered_map<std::uint32_t, std::size_t> fetchIndex;
+        // 分块DATA的接收缓冲 按requestId聚合
+        std::unordered_map<std::uint32_t, std::string> incoming;
         std::size_t outstanding = 0;
         bool stopped = false;
 
@@ -153,8 +152,8 @@ int main(int argc, char** argv) {
         };
 
         auto sendFrame = [&](xmr::protocol::MessageType type, std::uint32_t rid,
-                             const std::vector<std::uint8_t>& body) {
-            out.append(xmr::protocol::makeFrame(type, rid, body));
+                             const std::vector<std::uint8_t>& body, std::uint16_t flags = 0) {
+            out.append(xmr::protocol::makeFrame(type, rid, body, flags));
             flush();
         };
 
@@ -171,12 +170,21 @@ int main(int argc, char** argv) {
             // map产出的中间结果 已经按照R分区好了 现在还放在worker的内存上 等着shuffle
             for (std::size_t r = 0; r < parts.size(); ++r) {
                 // todo 论文里面master只负责管理元数据 业务数据是不管的 我们的架构里面先让master负责shuffle 把所有的中间结果网络发给master
-                xmr::protocol::MapOutput output;
-                output.mapTask = task.id;
-                output.partition = r;
-                output.offset = 0;
-                output.payload = toBytes(xmr::serializeKeyValues(parts[r]));
-                sendFrame(xmr::protocol::MessageType::MapOutput, 0, output.encode());
+                const std::string blob = xmr::serializeKeyValues(parts[r]);
+                std::size_t offset = 0;
+                do {
+                    const std::size_t n = std::min<std::size_t>(xmr::protocol::kChunkBytes, blob.size() - offset);
+                    xmr::protocol::MapOutput output;
+                    output.mapTask = task.id;
+                    output.partition = r;
+                    output.offset = offset;
+                    output.payload.assign(blob.begin() + static_cast<std::ptrdiff_t>(offset),
+                                          blob.begin() + static_cast<std::ptrdiff_t>(offset + n));
+                    const bool more = offset + n < blob.size();
+                    sendFrame(xmr::protocol::MessageType::MapOutput, 0, output.encode(),
+                              more ? static_cast<std::uint16_t>(xmr::protocol::Flag::More) : 0);
+                    offset += n;
+                } while (offset < blob.size());
             }
         };
 
@@ -242,7 +250,17 @@ int main(int argc, char** argv) {
                 return;
             }
             if (frame.header.type == xmr::protocol::MessageType::Data) {
-                const std::string payload = toString(xmr::protocol::DataMessage::decode(frame.body).payload);
+                const auto data = xmr::protocol::DataMessage::decode(frame.body);
+                std::string& buffer = incoming[frame.header.requestId];
+                if (data.offset != buffer.size()) {
+                    throw std::runtime_error("out of order DATA chunk");
+                }
+                buffer.append(data.payload.begin(), data.payload.end());
+                if ((frame.header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) != 0) {
+                    return;
+                }
+                const std::string payload = std::move(buffer);
+                incoming.erase(frame.header.requestId);
                 if (stage == Stage::WaitingInput) {
                     // worker收到master给的map任务数据 计算丢到线程池 算完再回reactor发结果
                     const xmr::Task task = *current;

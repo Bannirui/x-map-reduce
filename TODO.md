@@ -59,14 +59,12 @@ TODO
   - [X] V8.6 reactor robustness
     - [X] heartbeat (`Ping`/`Pong`) + timeouts
     - [X] master处理worker断连情况
-  - [ ] V8.7 large-blob streaming
-    - use `flags.More` + `offset` so `Data`/`MapOutput` are chunked
-    - drop the single 64MB frame ceiling
-    - [X] worker用线程池把map/reduce移出reactor
-    - [X] boss/acceptor+worker reactors
-      - [X] 模拟Netty的EventLoop线程模型
-      - [X] boss负责accept连接
-      - [X] work负责业务
+  - [X] V8.7 大协议处理
+  - [X] worker用线程池把map/reduce移出reactor
+  - [X] boss/acceptor+worker reactors
+    - [X] 模拟Netty的EventLoop线程模型
+    - [X] boss负责accept连接
+    - [X] work负责业务
 - [ ] 文件系统 模拟入口的大数据量文件 耦合or外部实现
 - [ ] master角色任务过重 拆分问题
   - [X] worker管理

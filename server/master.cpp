@@ -78,10 +78,6 @@ namespace {
                 static_cast<std::uint16_t>(std::stoul(endpoint.substr(colon + 1)))};
     }
 
-    std::vector<std::uint8_t> toBytes(const std::string& text) {
-        return std::vector<std::uint8_t>(text.begin(), text.end());
-    }
-
     // 转字符串
     std::string toString(const std::vector<std::uint8_t>& bytes) {
         return std::string(bytes.begin(), bytes.end());
@@ -141,7 +137,9 @@ namespace {
         void dispatch();
 
         void send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId,
-                  const std::vector<std::uint8_t>& body);
+                  const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
+
+        void sendBlob(ConnId id, std::uint32_t requestId, const std::string& blob);
 
         void requeueTask(const std::string& workerId);
 
@@ -236,7 +234,11 @@ namespace {
                     if (!held || held->kind != xmr::TaskKind::Map || held->id != output.mapTask) {
                         break;
                     }
-                    mapOutput_[output.mapTask][output.partition] = toString(output.payload);
+                    std::string& buffer = mapOutput_[output.mapTask][output.partition];
+                    if (output.offset != buffer.size()) {
+                        throw std::runtime_error("MAPOUT out of order");
+                    }
+                    buffer.append(output.payload.begin(), output.payload.end());
                     break;
                 }
                 case xmr::protocol::MessageType::Fetch: {
@@ -246,11 +248,7 @@ namespace {
                         throw std::runtime_error("FETCH out of range");
                     }
                     const std::string& blob = mapOutput_[fetch.mapTask][fetch.partition];
-                    xmr::protocol::DataMessage data;
-                    data.offset = 0;
-                    data.total = blob.size();
-                    data.payload = toBytes(blob);
-                    send(id, xmr::protocol::MessageType::Data, frame.header.requestId, data.encode());
+                    sendBlob(id, frame.header.requestId, blob);
                     break;
                 }
                 case xmr::protocol::MessageType::InputRequest: {
@@ -260,11 +258,7 @@ namespace {
                         throw std::runtime_error("INPUT out of range");
                     }
                     const std::string& blob = inputData_[request.taskId];
-                    xmr::protocol::DataMessage data;
-                    data.offset = 0;
-                    data.total = blob.size();
-                    data.payload = toBytes(blob);
-                    send(id, xmr::protocol::MessageType::Data, frame.header.requestId, data.encode());
+                    sendBlob(id, frame.header.requestId, blob);
                     break;
                 }
                 case xmr::protocol::MessageType::Result: {
@@ -339,17 +333,35 @@ namespace {
     }
 
     void Coordinator::send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId,
-                           const std::vector<std::uint8_t>& body) {
+                           const std::vector<std::uint8_t>& body, std::uint16_t flags) {
         const auto it = conns_.find(id);
         if (it == conns_.end()) {
             return;
         }
         const std::shared_ptr<Conn> conn = it->second;
-        const auto bytes = xmr::protocol::makeFrame(type, requestId, body);
+        const auto bytes = xmr::protocol::makeFrame(type, requestId, body, flags);
         conn->loop->queueInLoop([conn, bytes] {
             conn->out.append(bytes);
             flushConn(*conn);
         });
+    }
+
+    // 大blob分块发送 最后一块不带More
+    void Coordinator::sendBlob(ConnId id, std::uint32_t requestId, const std::string& blob) {
+        const std::size_t total = blob.size();
+        std::size_t offset = 0;
+        do {
+            const std::size_t n = std::min<std::size_t>(xmr::protocol::kChunkBytes, total - offset);
+            xmr::protocol::DataMessage data;
+            data.offset = offset;
+            data.total = total;
+            data.payload.assign(blob.begin() + static_cast<std::ptrdiff_t>(offset),
+                                blob.begin() + static_cast<std::ptrdiff_t>(offset + n));
+            const bool more = offset + n < total;
+            send(id, xmr::protocol::MessageType::Data, requestId, data.encode(),
+                 more ? static_cast<std::uint16_t>(xmr::protocol::Flag::More) : 0);
+            offset += n;
+        } while (offset < total);
     }
 
     // 回收worker持有的任务 重发
@@ -362,6 +374,12 @@ namespace {
 
     // 重发任务 次数用尽才判整个job失败
     void Coordinator::retryOrFail(const xmr::Task& task) {
+        // map任务重发前清掉上一次尝试可能残留的半截中间结果
+        if (task.kind == xmr::TaskKind::Map && task.id < mapOutput_.size()) {
+            for (std::string& part : mapOutput_[task.id]) {
+                part.clear();
+            }
+        }
         if (!scheduler_.retry(task)) {
             scheduler_.markFailed(task.kind, task.id, "attempts exhausted");
         }
