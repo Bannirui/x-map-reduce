@@ -4,39 +4,46 @@
 #include<utility>
 
 namespace xmr {
-    Scheduler::Scheduler(std::string job, std::vector<std::string> inputs, std::size_t reducers)
-        : job_(std::move(job)), inputs_(std::move(inputs)), reducers_(reducers) {
+    Scheduler::Scheduler(std::string job, std::vector<std::string> inputs, std::size_t reducers,
+                         std::uint32_t maxAttempts)
+        : job_(std::move(job)), inputs_(std::move(inputs)), reducers_(reducers), maxAttempts_(maxAttempts) {
         if (reducers_ == 0) {
             throw std::runtime_error("reducers must be > 0");
         }
         if (inputs_.empty()) {
             throw std::runtime_error("at least one input is required");
         }
+        if (maxAttempts_ == 0) {
+            throw std::runtime_error("maxAttempts must be > 0");
+        }
+        mapEntries_.resize(inputs_.size());
+        reduceEntries_.resize(reducers_);
+        for (std::size_t id = 0; id < inputs_.size(); ++id) {
+            mapPending_.push_back(id);
+        }
+        for (std::size_t id = 0; id < reducers_; ++id) {
+            reducePending_.push_back(id);
+        }
     }
 
     std::optional<Task> Scheduler::takeTask() {
         // map阶段派发map任务
-        if (phase_ == Phase::Map && nextMap_ < inputs_.size()) {
-            Task task;
-            task.kind = TaskKind::Map;
-            task.id = nextMap_;
-            task.job = job_;
-            task.reducers = reducers_;
-            task.maps = inputs_.size();
-            task.input = inputs_[nextMap_];
-            ++nextMap_;
-            return task;
+        if (phase_ == Phase::Map && !mapPending_.empty()) {
+            const std::size_t id = mapPending_.front();
+            mapPending_.pop_front();
+            Entry& entry = mapEntries_[id];
+            ++entry.attempt;
+            entry.state = Entry::State::InFlight;
+            return makeTask(TaskKind::Map, id, entry.attempt);
         }
         // reduce阶段派发reduce任务
-        if (phase_ == Phase::Reduce && nextReduce_ < reducers_) {
-            Task task;
-            task.kind = TaskKind::Reduce;
-            task.id = nextReduce_;
-            task.job = job_;
-            task.reducers = reducers_;
-            task.maps = inputs_.size();
-            ++nextReduce_;
-            return task;
+        if (phase_ == Phase::Reduce && !reducePending_.empty()) {
+            const std::size_t id = reducePending_.front();
+            reducePending_.pop_front();
+            Entry& entry = reduceEntries_[id];
+            ++entry.attempt;
+            entry.state = Entry::State::InFlight;
+            return makeTask(TaskKind::Reduce, id, entry.attempt);
         }
         /**
          * 没有任务可以派发
@@ -48,13 +55,37 @@ namespace xmr {
         return std::nullopt;
     }
 
-    void Scheduler::markDone(TaskKind kind) {
+    bool Scheduler::retry(const Task& task) {
+        // 找到这个任务
+        Entry& entry = entryOf(task.kind, task.id);
+        if (entry.state != Entry::State::InFlight || task.attempt != entry.attempt || entry.attempt >= maxAttempts_) {
+            return false;
+        }
+        // 状态更新 可以下一次重新派发
+        entry.state = Entry::State::Pending;
+        if (task.kind == TaskKind::Map) {
+            mapPending_.push_back(task.id);
+        } else {
+            reducePending_.push_back(task.id);
+        }
+        return true;
+    }
+
+    bool Scheduler::markDone(TaskKind kind, std::size_t id, std::uint32_t attempt) {
+        // 找到任务
+        Entry& entry = entryOf(kind, id);
+        if (entry.state != Entry::State::InFlight || attempt != entry.attempt) {
+            return false;
+        }
+        // 标记任务状态
+        entry.state = Entry::State::Done;
         if (kind == TaskKind::Map) {
             ++mapDone_;
         } else {
             ++reduceDone_;
         }
         advanceIfPhaseComplete();
+        return true;
     }
 
     void Scheduler::markFailed(TaskKind kind, std::size_t id, std::string reason) {
@@ -63,11 +94,47 @@ namespace xmr {
                  + " task " + std::to_string(id) + " failed: " + std::move(reason);
     }
 
+    std::uint32_t Scheduler::attemptOf(TaskKind kind, std::size_t id) const {
+        return entryOf(kind, id).attempt;
+    }
+
+    Scheduler::Entry& Scheduler::entryOf(TaskKind kind, std::size_t id) {
+        auto& entries = kind == TaskKind::Map ? mapEntries_ : reduceEntries_;
+        if (id >= entries.size()) {
+            throw std::runtime_error("task id out of range");
+        }
+        return entries[id];
+    }
+
+    const Scheduler::Entry& Scheduler::entryOf(TaskKind kind, std::size_t id) const {
+        const auto& entries = kind == TaskKind::Map ? mapEntries_ : reduceEntries_;
+        if (id >= entries.size()) {
+            throw std::runtime_error("task id out of range");
+        }
+        return entries[id];
+    }
+
+    Task Scheduler::makeTask(TaskKind kind, std::size_t id, std::uint32_t attempt) const {
+        Task task;
+        task.kind = kind;
+        task.id = id;
+        task.attempt = attempt;
+        task.job = job_;
+        task.reducers = reducers_;
+        task.maps = inputs_.size();
+        if (kind == TaskKind::Map) {
+            task.input = inputs_[id];
+        }
+        return task;
+    }
+
     void Scheduler::advanceIfPhaseComplete() {
         if (phase_ == Phase::Map && mapDone_ == inputs_.size()) {
+            // map任务全部执行完滚动到reduce阶段
             phase_ = Phase::Reduce;
         }
         if (phase_ == Phase::Reduce && reduceDone_ == reducers_) {
+            // 所有任务都执行完了
             phase_ = Phase::Done;
         }
     }

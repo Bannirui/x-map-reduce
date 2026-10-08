@@ -14,24 +14,30 @@ TODO
 - [ ] V5 Fault-tolerant MapReduce
   - [ ] V5.0 task attempts
     - idempotent retry
+      - [X] Scheduler: attempt+requeue(放回未完成任务，first attempt wins)
+      - [ ] 陈旧attempt防护(迟到MapOutput/Done不覆盖新attempt)
     - task timeouts
+      - [ ] 单任务超时重派(复用 TimerQueue)
     - worker-death recovery
+      - [ ] WorkerRegistry: Lost可复活/remove取回持有的task
+      - [ ] master: pollExpired/taskOf/requeue/remove重派 断开走同一路径
   - [ ] V5.1 speculative execution
     - duplicate slow tasks
     - first attempt wins
-  - [ ] V5.2 heartbeat liveness
+  - [X] V5.2 heartbeat liveness
     - [X] 定时任务功能 队列+selector
       - [X] 小根堆+多个缓存标识逻辑删除
       - [X] 打标标识逻辑删除
       - [X] 定时任务id的哨兵值0抽出来
     - [X] worker-master两端的ping-pong
-    - [ ] 抽离master的资源管理职责
+    - [X] 抽离master的资源管理职责
       - [X] 定义`WorkerRegistry`
         - [X] 注册/身份(accept+Hello)
         - [X] 空闲/忙(idle, lastRequest)
         - [X] 存活/心跳(lastSeen, watchdog, 超时判定)
         - [X] 任务归属(worker->持有的task/attempt，供重发)
       - [X] master接入 只留 I/O，管理逻辑迁出
+      - [ ] worker假死重新上线回收
 - [ ] V6 Job submission—submit arbitrary map/reduce to the master
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface

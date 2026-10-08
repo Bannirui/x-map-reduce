@@ -3,6 +3,7 @@
 #include"mapreduce/mapreduce.h"
 
 #include<cstddef>
+#include<cstdint>
 #include<functional>
 #include<string>
 #include<vector>
@@ -19,6 +20,12 @@ namespace xmr {
          * reduce任务 reduce id 用来索引map输出的分区
          */
         std::size_t id = 0;
+        /**
+         * 任务的尝试序号
+         * 同一(kind,id)的第几次执行 用来区分 同一任务的多次尝试 从而支持重发和挡住迟到结果。
+         * 默认0的含义 0是个从未执行的哨兵 有效值从1开始
+         */
+        std::uint32_t attempt = 0;
         // 任务名称 唯一索引
         std::string job;
         // R map输出分区的依据

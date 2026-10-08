@@ -193,13 +193,19 @@ int main(int argc, char** argv) {
                 }
                 case xmr::protocol::MessageType::Done: {
                     const auto done = xmr::protocol::Done::decode(frame.body);
-                    scheduler.markDone(xmr::taskKind(done.kind));
+                    const auto held = registry.taskOf(worker.id);
+                    if (held && held->kind == xmr::taskKind(done.kind) && held->id == done.taskId) {
+                        scheduler.markDone(held->kind, held->id, held->attempt);
+                    }
                     registry.complete(worker.id);
                     break;
                 }
                 case xmr::protocol::MessageType::Fail: {
                     const auto fail = xmr::protocol::Fail::decode(frame.body);
-                    scheduler.markFailed(xmr::taskKind(fail.kind), fail.taskId, fail.reason);
+                    const auto held = registry.taskOf(worker.id);
+                    if (held && held->kind == xmr::taskKind(fail.kind) && held->id == fail.taskId) {
+                        scheduler.markFailed(held->kind, held->id, fail.reason);
+                    }
                     registry.complete(worker.id);
                     break;
                 }

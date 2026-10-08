@@ -16,6 +16,10 @@ add_executable(worker_registry_test worker_registry_test.cpp)
 target_link_libraries(worker_registry_test PRIVATE x-runtime)
 add_test(NAME worker_registry_test COMMAND worker_registry_test)
 
+add_executable(scheduler_test scheduler_test.cpp)
+target_link_libraries(scheduler_test PRIVATE x-runtime)
+add_test(NAME scheduler_test COMMAND scheduler_test)
+
 add_executable(protocol_test protocol_test.cpp)
 target_link_libraries(protocol_test PRIVATE x-protocol)
 add_test(NAME protocol_test COMMAND protocol_test)
