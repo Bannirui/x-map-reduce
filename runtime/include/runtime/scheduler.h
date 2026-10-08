@@ -51,6 +51,8 @@ namespace xmr {
          */
         bool markDone(TaskKind kind, std::size_t id, std::uint32_t attempt);
 
+        bool invalidate(TaskKind kind, std::size_t id);
+
         void markFailed(TaskKind kind, std::size_t id, std::string reason);
 
         /**

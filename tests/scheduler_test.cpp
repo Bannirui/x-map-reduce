@@ -103,6 +103,21 @@ int main() {
 
         {
             Scheduler scheduler("job", {"a"}, 1, 3);
+            const auto map = scheduler.takeTask();
+            check(scheduler.markDone(TaskKind::Map, 0, 1), "map completes");
+            check(scheduler.phase() == Phase::Reduce, "phase advances after the barrier");
+            check(scheduler.invalidate(TaskKind::Map, 0), "a completed map can be invalidated");
+            check(scheduler.phase() == Phase::Map, "phase falls back to Map after invalidation");
+            const auto redo = scheduler.takeTask();
+            check(redo && redo->kind == TaskKind::Map && redo->id == 0 && redo->attempt == 2,
+                  "invalidated map is re-issued as attempt 2");
+            check(!scheduler.invalidate(TaskKind::Map, 0), "invalidating a non-done map fails");
+            check(scheduler.markDone(TaskKind::Map, 0, 2), "re-run map completes");
+            check(scheduler.phase() == Phase::Reduce, "phase advances again");
+        }
+
+        {
+            Scheduler scheduler("job", {"a"}, 1, 3);
             const auto task = scheduler.takeTask();
             scheduler.markFailed(TaskKind::Map, task->id, "boom");
             check(scheduler.failed(), "markFailed sets the Failed phase");

@@ -175,6 +175,9 @@ namespace {
 
         void requeueTask(const std::string& workerId);
 
+        // worker失效:重发它手里的任务 并作废它名下已完成的map(输出丢了)
+        void recoverWorker(const std::string& workerId);
+
         void retryOrFail(const xmr::Task& task);
 
         void requestShutdown();
@@ -206,7 +209,7 @@ namespace {
         // worker存活/任务超时始终维护 和有没有job无关
         const auto expired = registry_.poll(now);
         for (const auto& workerId : expired.workers) {
-            requeueTask(workerId);
+            recoverWorker(workerId);
         }
         for (const auto& task : expired.tasks) {
             retryOrFail(task);
@@ -354,7 +357,8 @@ namespace {
                     const auto fail = xmr::protocol::Fail::decode(frame.body);
                     const auto held = registry_.taskOf(conn.workerId);
                     if (held && held->kind == xmr::taskKind(fail.kind) && held->id == fail.taskId) {
-                        job_->scheduler.markFailed(held->kind, held->id, fail.reason);
+                        // 任务失败按重试处理 次数用尽才判死整个job
+                        retryOrFail(*held);
                     }
                     registry_.complete(conn.workerId);
                     break;
@@ -408,7 +412,7 @@ namespace {
         }
         const std::shared_ptr<Conn> conn = it->second;
         if (!conn->workerId.empty()) {
-            requeueTask(conn->workerId);
+            recoverWorker(conn->workerId);
             registry_.remove(conn->workerId);
             byWorker_.erase(conn->workerId);
             workerData_.erase(conn->workerId);
@@ -506,6 +510,22 @@ namespace {
         const auto task = registry_.reclaim(workerId);
         if (task) {
             retryOrFail(*task);
+        }
+    }
+
+    void Coordinator::recoverWorker(const std::string& workerId) {
+        requeueTask(workerId);
+        if (!job_) {
+            return;
+        }
+        // 该worker上已完成的map输出随它一起没了 需要重跑
+        for (auto it = mapOwner_.begin(); it != mapOwner_.end();) {
+            if (it->second == workerId) {
+                job_->scheduler.invalidate(xmr::TaskKind::Map, it->first);
+                it = mapOwner_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 

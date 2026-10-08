@@ -51,8 +51,8 @@ TODO
       - [X] 数据面：worker<->worker直连传map中间结果(reduce直接去map worker拉对应分区)，master只下发 去哪个worker拉哪个分区的元数据
       - [X] worker开自己的数据listener供其它worker拉数据，注册时把端口报给master
       - [X] map结果只留在map worker本地，master只记mapTask -> worker
-      - [ ] 缺口：map worker在reduce拉取前死掉会导致中间结果丢失(需要重新执行已完成map)
-    - [ ] 前置：常驻化 master/worker(while 循环服务，不再一个 job 就退出)
+      - [X] map worker在reduce拉取前死掉会导致中间结果丢失 作废其名下完成的map并重跑
+    - [ ] 前置：常驻化 master/worker(while 循环服务，不再一个job就退出)
       - [X] worker: `Stop`=本job结束并复位状态(epoch防串)、`Shutdown`=退出；保持连接与心跳
       - [X] master: server启动一次、每job一份coordinator生命周期(等提交->跑->回复->复位)
     - [X] 任务提交client端侧的约定 给跨语言做准备

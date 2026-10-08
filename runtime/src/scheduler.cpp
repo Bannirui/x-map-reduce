@@ -94,8 +94,30 @@ namespace xmr {
                  + " task " + std::to_string(id) + " failed: " + std::move(reason);
     }
 
-    std::uint32_t Scheduler::attemptOf(TaskKind kind, std::size_t id) const {
-        return entryOf(kind, id).attempt;
+    bool Scheduler::invalidate(TaskKind kind, std::size_t id) {
+        Entry& entry = entryOf(kind, id);
+        if (entry.state != Entry::State::Done) {
+            return false;
+        }
+        // 已完成的任务作废 退回待派发 重新执行(比如它的输出所在worker死了)
+        entry.state = Entry::State::Pending;
+        if (kind == TaskKind::Map) {
+            --mapDone_;
+            mapPending_.push_back(id);
+            if (phase_ == Phase::Reduce) {
+                phase_ = Phase::Map;
+            }
+        } else {
+            --reduceDone_;
+            reducePending_.push_back(id);
+            if (phase_ == Phase::Done) {
+                phase_ = Phase::Reduce;
+            }
+        }
+        return true;
+    }
+
+    std::uint32_t Scheduler::attemptOf(TaskKind kind, std::size_t id) const {        return entryOf(kind, id).attempt;
     }
 
     Scheduler::Entry& Scheduler::entryOf(TaskKind kind, std::size_t id) {
