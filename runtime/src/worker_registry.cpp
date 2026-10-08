@@ -38,8 +38,12 @@ namespace xmr {
 
     bool WorkerRegistry::touch(const std::string& id, TimePoint now) {
         const auto it = workers_.find(id);
-        if (it == workers_.end() || it->second.state == WorkerState::Lost) {
+        if (it == workers_.end()) {
             return false;
+        }
+        // 假死的worker重新冒泡 说明它其实还活着 撤销主观下线判定
+        if (it->second.state == WorkerState::Lost) {
+            it->second.state = WorkerState::Registered;
         }
         // 刷新心跳看门狗
         arm(id, it->second, now);
@@ -113,6 +117,16 @@ namespace xmr {
             return std::nullopt;
         }
         return it->second.task;
+    }
+
+    std::optional<Task> WorkerRegistry::reclaim(const std::string& id) {
+        const auto it = workers_.find(id);
+        if (it == workers_.end()) {
+            return std::nullopt;
+        }
+        std::optional<Task> task = it->second.task;
+        it->second.task.reset();
+        return task;
     }
 
     std::size_t WorkerRegistry::size() const {

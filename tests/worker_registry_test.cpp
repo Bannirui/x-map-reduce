@@ -58,10 +58,14 @@ int main() {
             const auto expired = registry.pollExpired(t0 + milliseconds(190));
             check(expired.size() == 1 && expired[0] == "w1", "worker expires at the refreshed deadline");
             check(registry.state("w1") == WorkerState::Lost, "expired worker is marked Lost");
-            check(!registry.touch("w1", t0 + milliseconds(200)), "lost worker cannot be touched");
             check(!registry.markIdle("w1"), "lost worker cannot go idle");
             check(registry.nextTimeoutMs(t0 + milliseconds(200)) == -1,
                   "no pending watchdog after expiry");
+            check(registry.touch("w1", t0 + milliseconds(200)), "activity revives a lost worker");
+            check(registry.state("w1") == WorkerState::Registered, "revived worker is Registered");
+            check(registry.nextTimeoutMs(t0 + milliseconds(200)) == 100,
+                  "revived worker gets a fresh watchdog");
+            check(registry.markIdle("w1"), "revived worker can go idle");
             check(registry.remove("w1"), "lost worker can still be removed");
         }
 
@@ -101,6 +105,22 @@ int main() {
             check(registry.complete("w1"), "completing a task succeeds");
             check(registry.state("w1") == WorkerState::Registered, "completed worker returns to Registered");
             check(!registry.taskOf("w1").has_value(), "task is cleared on completion");
+        }
+
+        {
+            WorkerRegistry registry(milliseconds(1000));
+            registry.add("w1", t0);
+            registry.markIdle("w1");
+            Task task;
+            task.kind = TaskKind::Map;
+            task.id = 5;
+            const auto assigned = registry.assignNext(task);
+            check(assigned.has_value() && *assigned == "w1", "worker takes the task");
+            const auto reclaimed = registry.reclaim("w1");
+            check(reclaimed.has_value() && reclaimed->id == 5, "reclaim returns the held task");
+            check(!registry.taskOf("w1").has_value(), "reclaim clears the held task");
+            check(!registry.reclaim("w1").has_value(), "reclaim twice returns nothing");
+            check(!registry.reclaim("missing").has_value(), "reclaim of unknown worker returns nothing");
         }
     } catch (const std::exception& error) {
         std::cerr << "unexpected exception: " << error.what() << '\n';

@@ -107,6 +107,8 @@ namespace xmr {
          */
         std::optional<Task> taskOf(const std::string& id) const;
 
+        std::optional<Task> reclaim(const std::string& id);
+
         /**
          * master上注册了多少个worker
          */

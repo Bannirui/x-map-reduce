@@ -15,12 +15,12 @@ TODO
   - [ ] V5.0 task attempts
     - idempotent retry
       - [X] Scheduler: attempt+requeue(放回未完成任务，first attempt wins)
-      - [ ] 陈旧attempt防护(迟到MapOutput/Done不覆盖新attempt)
+      - [X] 陈旧attempt防护(迟到MapOutput/Done不覆盖新attempt)
     - task timeouts
       - [ ] 单任务超时重派(复用 TimerQueue)
     - worker-death recovery
-      - [ ] WorkerRegistry: Lost可复活/remove取回持有的task
-      - [ ] master: pollExpired/taskOf/requeue/remove重派 断开走同一路径
+      - [X] WorkerRegistry: Lost可复活/remove取回持有的task
+      - [X] master: pollExpired/taskOf/requeue/remove重派 断开走同一路径
   - [ ] V5.1 speculative execution
     - duplicate slow tasks
     - first attempt wins
@@ -65,3 +65,10 @@ TODO
   - [ ] V8.8 move map/reduce compute off the event loop / multi-reactor (boss/work group, refer to Netty)
     - business work on a thread pool (Netty-style)
     - boss/acceptor + worker reactors
+- [ ] 文件系统 模拟入口的大数据量文件 耦合or外部实现
+- [ ] master角色任务过重 拆分问题
+  - [X] worker管理
+  - [X] 任务调度
+  - [ ] worker服务器资源 CPU 磁盘等等
+    - [ ] master可以主动观测
+    - [ ] master对worker任务派发策略

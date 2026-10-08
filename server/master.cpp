@@ -215,6 +215,10 @@ int main(int argc, char** argv) {
                     if (output.mapTask >= mapOutput.size() || output.partition >= reducers) {
                         throw std::runtime_error("MAPOUT out of range");
                     }
+                    const auto held = registry.taskOf(worker.id);
+                    if (!held || held->kind != xmr::TaskKind::Map || held->id != output.mapTask) {
+                        break;
+                    }
                     mapOutput[output.mapTask][output.partition] = toString(output.payload);
                     break;
                 }
@@ -274,7 +278,35 @@ int main(int argc, char** argv) {
             }
         };
 
+        // 回收worker持有的任务 重发 次数用尽才判整个job失败
+        auto requeueTask = [&](const std::string& id) {
+            const auto task = registry.reclaim(id);
+            if (!task) {
+                return;
+            }
+            if (!scheduler.retry(*task)) {
+                scheduler.markFailed(task->kind, task->id, "attempts exhausted");
+            }
+        };
+
+        // 断开/失联的worker从master清理掉 任务回收重发
+        auto dropWorker = [&](Worker& worker) {
+            if (!worker.id.empty()) {
+                requeueTask(worker.id);
+                registry.remove(worker.id);
+                byId.erase(worker.id);
+            }
+            poller.remove(worker.connection.fd());
+            byFd.erase(worker.connection.fd());
+            workers.erase(std::remove_if(workers.begin(), workers.end(),
+                                         [&](const std::unique_ptr<Worker>& w) {
+                                             return w.get() == &worker;
+                                         }),
+                          workers.end());
+        };
+
         auto readWorker = [&](Worker& worker) {
+            bool peerClosed = false;
             while (true) {
                 const xmr::net::IoStatus status = xmr::net::recvInto(worker.connection.fd(), worker.in);
                 if (status == xmr::net::IoStatus::Ok) {
@@ -283,7 +315,12 @@ int main(int argc, char** argv) {
                 if (status == xmr::net::IoStatus::WouldBlock) {
                     break;
                 }
-                throw std::runtime_error("worker disconnected");
+                peerClosed = true;
+                break;
+            }
+            if (peerClosed) {
+                dropWorker(worker);
+                return;
             }
             processInput(worker);
             if (registry.contains(worker.id)) {
@@ -349,7 +386,7 @@ int main(int argc, char** argv) {
                 }
             }
             for (const auto& id : registry.pollExpired(std::chrono::steady_clock::now())) {
-                throw std::runtime_error("worker " + id + " heartbeat timeout");
+                requeueTask(id);
             }
             dispatch();
         }
