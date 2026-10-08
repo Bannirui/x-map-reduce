@@ -281,7 +281,6 @@ namespace xmr::protocol {
     namespace submit {
         inline constexpr std::uint16_t kJob = 1;
         inline constexpr std::uint16_t kReducers = 2;
-        inline constexpr std::uint16_t kWorkers = 3;
         inline constexpr std::uint16_t kOutput = 4;
         inline constexpr std::uint16_t kInput = 5;
         inline constexpr std::uint16_t kPluginHash = 6;

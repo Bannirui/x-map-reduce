@@ -151,7 +151,6 @@ int main(int argc, char** argv) {
         "--job", "word_count",
         "--plugin", plugin,
         "--reducers", std::to_string(reducers),
-        "--workers", "2",
         "--output", output.string(),
         "--shutdown",
     };

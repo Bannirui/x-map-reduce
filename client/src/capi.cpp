@@ -44,7 +44,7 @@ extern "C" {
         }
     }
 
-    int xmr_client_submit(xmr_client* client, const char* job, uint64_t reducers, uint64_t workers,
+    int xmr_client_submit(xmr_client* client, const char* job, uint64_t reducers,
                           const char* output, const char* const* inputs, size_t inputCount,
                           char* reason, size_t reasonCapacity) {
         if (client == nullptr) {
@@ -54,7 +54,6 @@ extern "C" {
             xmr::client::SubmitRequest request;
             request.job = job == nullptr ? "" : job;
             request.reducers = reducers;
-            request.workers = workers;
             request.output = output == nullptr ? "" : output;
             request.pluginPath = client->pluginPath;
             for (std::size_t i = 0; i < inputCount; ++i) {

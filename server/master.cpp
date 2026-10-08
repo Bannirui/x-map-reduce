@@ -110,11 +110,10 @@ namespace {
     // 一次提交进来的一次job运行的全部状态
     struct JobState {
         JobState(std::string job, std::vector<std::string> inputs, std::size_t reducers,
-                 std::vector<std::string> inputData, std::size_t expectedWorkers, std::string output, ConnId client)
+                 std::vector<std::string> inputData, std::string output, ConnId client)
             : scheduler(job, inputs, reducers),
               name(std::move(job)),
               inputData(std::move(inputData)),
-              expectedWorkers(expectedWorkers),
               output(std::move(output)),
               client(client) {
         }
@@ -123,7 +122,6 @@ namespace {
         std::string name;
         std::vector<std::string> inputData;
         std::vector<KeyValue> merged;
-        std::size_t expectedWorkers = 1;
         std::string output;
         ConnId client = 0;
     };
@@ -267,7 +265,7 @@ namespace {
         };
 
         if (submit.job.empty() || submit.output.empty() || submit.inputs.empty()
-            || submit.reducers == 0 || submit.workers == 0) {
+            || submit.reducers == 0) {
             reject(xmr::protocol::StatusCode::InvalidArgument, "invalid submit");
             return;
         }
@@ -285,7 +283,7 @@ namespace {
         }
 
         job_ = std::make_unique<JobState>(submit.job, submit.inputs, submit.reducers,
-                                          std::move(inputData), submit.workers, submit.output, client);
+                                          std::move(inputData), submit.output, client);
         mapOwner_.clear();
         pluginHash_ = submit.pluginHash;
         pluginReady_ = 0;
@@ -577,10 +575,11 @@ namespace {
     }
 
     void Coordinator::dispatch() {
-        if (byWorker_.size() < job_->expectedWorkers) {
+        if (byWorker_.empty()) {
             return;
         }
-        if (!pluginHash_.empty() && pluginReady_ < job_->expectedWorkers) {
+        // 用当前已连接的worker：等它们都就绪再派
+        if (!pluginHash_.empty() && pluginReady_ < byWorker_.size()) {
             return;
         }        while (registry_.hasIdle()) {
             auto task = job_->scheduler.takeTask();

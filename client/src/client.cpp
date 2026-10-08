@@ -59,7 +59,6 @@ namespace xmr::client {
         protocol::Submit submit;
         submit.job = request.job;
         submit.reducers = request.reducers;
-        submit.workers = request.workers;
         submit.output = request.output;
         submit.inputs = request.inputs;
         if (!plugin.empty()) {

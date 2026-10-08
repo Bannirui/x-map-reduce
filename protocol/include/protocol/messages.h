@@ -163,7 +163,6 @@ namespace xmr::protocol {
     struct Submit {
         std::string job;
         std::uint64_t reducers = 1;
-        std::uint64_t workers = 1;
         std::string output;
         std::vector<std::string> inputs;
         // 插件的内容哈希 为空表示worker本地已预加载

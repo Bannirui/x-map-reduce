@@ -23,7 +23,7 @@ void xmr_client_set_plugin(xmr_client* client, const char* pluginPath);
  * @return 0-master受理任务了
  *         n-被master拒了 reason里是原因
  */
-int xmr_client_submit(xmr_client* client, const char* job, uint64_t reducers, uint64_t workers,
+int xmr_client_submit(xmr_client* client, const char* job, uint64_t reducers,
                       const char* output, const char* const* inputs, size_t inputCount,
                       char* reason, size_t reasonCapacity);
 

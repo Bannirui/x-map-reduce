@@ -470,7 +470,6 @@ namespace xmr::protocol {
         FieldWriter writer;
         writer.putString(submit::kJob, job);
         writer.putU64(submit::kReducers, reducers);
-        writer.putU64(submit::kWorkers, workers);
         writer.putString(submit::kOutput, output);
         writer.putString(submit::kPluginHash, pluginHash);
         for (const auto& input : inputs) {
@@ -489,9 +488,6 @@ namespace xmr::protocol {
                     break;
                 case submit::kReducers:
                     message.reducers = reader.asU64();
-                    break;
-                case submit::kWorkers:
-                    message.workers = reader.asU64();
                     break;
                 case submit::kOutput:
                     message.output = reader.asString();

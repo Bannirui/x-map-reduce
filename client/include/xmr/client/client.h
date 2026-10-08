@@ -13,7 +13,6 @@ namespace xmr::client {
     struct SubmitRequest {
         std::string job;
         std::uint64_t reducers = 1;
-        std::uint64_t workers = 1;
         std::string output;
         std::vector<std::string> inputs;
         // 插件.so的本地路径 由client读出来上传 为空表示worker本地已预加载

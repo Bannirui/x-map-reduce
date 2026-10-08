@@ -89,3 +89,4 @@ TODO
   - [ ] worker服务器资源 CPU 磁盘等等
     - [ ] master可以主动观测
     - [ ] master对worker任务派发策略
+- [X] 支持worker的动态扩容

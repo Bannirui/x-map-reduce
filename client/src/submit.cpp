@@ -9,7 +9,7 @@ namespace {
     void usage(const char* program) {
         std::cerr << "Usage: " << program
             << " --master <host:port> --job <name> [--plugin <path>] [--reducers <R>]"
-            << " [--workers <N>] [--shutdown] --output <file> <input...>\n";
+            << " [--shutdown] --output <file> <input...>\n";
     }
 } // namespace
 
@@ -19,7 +19,6 @@ int main(int argc, char** argv) {
     std::string output;
     std::string pluginPath;
     std::uint64_t reducers = 1;
-    std::uint64_t workers = 1;
     std::vector<std::string> inputs;
     bool shutdownAfter = false;
 
@@ -33,8 +32,6 @@ int main(int argc, char** argv) {
             pluginPath = argv[++i];
         } else if (arg == "--reducers" && i + 1 < argc) {
             reducers = std::stoull(argv[++i]);
-        } else if (arg == "--workers" && i + 1 < argc) {
-            workers = std::stoull(argv[++i]);
         } else if (arg == "--output" && i + 1 < argc) {
             output = argv[++i];
         } else if (arg == "--shutdown") {
@@ -54,7 +51,6 @@ int main(int argc, char** argv) {
         xmr::client::SubmitRequest request;
         request.job = job;
         request.reducers = reducers;
-        request.workers = workers;
         request.output = output;
         request.inputs = inputs;
         request.pluginPath = pluginPath;
