@@ -174,55 +174,6 @@ namespace xmr::net {
         }
     }
 
-    void recvAll(int fd, void* data, std::size_t size) {
-        auto* bytes = static_cast<std::uint8_t*>(data);
-        while (size > 0) {
-            const ssize_t received = ::recv(fd, bytes, size, 0);
-            if (received < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                throw systemError("recv failed");
-            }
-            if (received == 0) {
-                throw std::runtime_error("connection closed while receiving");
-            }
-            bytes += received;
-            size -= static_cast<std::size_t>(received);
-        }
-    }
-
-    void sendMessage(int fd, const void* data, std::size_t size) {
-        if (size > kMaxMessageBytes) {
-            throw std::runtime_error("message exceeds kMaxMessageBytes");
-        }
-        const std::uint32_t prefix = htonl(static_cast<std::uint32_t>(size));
-        sendAll(fd, &prefix, sizeof(prefix));
-        if (size > 0) {
-            sendAll(fd, data, size);
-        }
-    }
-
-    void sendMessage(int fd, const std::vector<std::uint8_t>& message) {
-        sendMessage(fd, message.data(), message.size());
-    }
-
-    std::vector<std::uint8_t> receiveMessage(int fd) {
-        // 消息协议 [4字节大小][实际数据]
-        std::uint32_t prefix = 0;
-        recvAll(fd, &prefix, sizeof(prefix));
-        // 网络大端序转主机小端序
-        const std::uint32_t size = ntohl(prefix);
-        if (size > kMaxMessageBytes) {
-            throw std::runtime_error("message exceeds kMaxMessageBytes");
-        }
-        std::vector<std::uint8_t> message(size);
-        if (size > 0) {
-            recvAll(fd, message.data(), size);
-        }
-        return message;
-    }
-
     Connection::Connection(int fd) : fd_(fd) {
     }
 
@@ -245,18 +196,6 @@ namespace xmr::net {
             other.fd_ = -1;
         }
         return *this;
-    }
-
-    void Connection::send(const void* data, std::size_t size) const {
-        sendMessage(fd_, data, size);
-    }
-
-    void Connection::send(const std::vector<std::uint8_t>& message) const {
-        sendMessage(fd_, message);
-    }
-
-    std::vector<std::uint8_t> Connection::receive() const {
-        return receiveMessage(fd_);
     }
 
     Listener::Listener(const std::string& host, std::uint16_t port) {

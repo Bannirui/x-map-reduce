@@ -27,12 +27,6 @@ namespace xmr {
         std::size_t maps = 0;
         // map任务才要关注 map任务的输入[key,value]的key
         std::string input;
-
-        // 序列化成文本协议 格式是 字段\t数据
-        std::string serialize() const;
-
-        // 文本协议反序列化
-        static Task deserialize(const std::string& text);
     };
 
     // Data-plane encoding: the same "key\tvalue\n" layout the old files used, just

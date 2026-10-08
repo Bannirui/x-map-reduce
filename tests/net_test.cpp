@@ -1,9 +1,9 @@
+#include "net/buffer.h"
 #include "net/net.h"
 
 #include <atomic>
 #include <cstdint>
 #include <iostream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,12 +19,11 @@ void check(bool condition, const std::string& message) {
     }
 }
 
-std::vector<std::uint8_t> toBytes(const std::string& text) {
-    return std::vector<std::uint8_t>(text.begin(), text.end());
-}
-
-std::string toString(const std::vector<std::uint8_t>& bytes) {
-    return std::string(bytes.begin(), bytes.end());
+std::string bufferString(const xmr::net::ByteBuffer& buffer) {
+    if (buffer.empty()) {
+        return {};
+    }
+    return std::string(reinterpret_cast<const char*>(buffer.data()), buffer.size());
 }
 
 }  // namespace
@@ -38,18 +37,20 @@ int main() {
         const std::uint16_t port = listener.port();
         check(port != 0, "listener should report a real port when bound to 0");
 
-        const std::string small = "hello mapreduce";
-        const std::string empty;
-        const std::string large(200000, 'x');
+        const std::string request = "hello mapreduce";
+        const std::string reply(200000, 'x');
 
-        // The server echoes three messages: they exercise the small framing
-        // path, the zero-length path, and a payload larger than a socket buffer.
         std::thread server([&] {
             try {
                 Connection connection = listener.accept();
-                for (int i = 0; i < 3; ++i) {
-                    connection.send(connection.receive());
+                ByteBuffer inbound;
+                while (inbound.size() < request.size()) {
+                    if (recvInto(connection.fd(), inbound) == IoStatus::Closed) {
+                        break;
+                    }
                 }
+                check(bufferString(inbound) == request, "server should receive the request");
+                sendAll(connection.fd(), reply.data(), reply.size());
             } catch (const std::exception& error) {
                 std::cerr << "server error: " << error.what() << '\n';
                 ++failures;
@@ -57,15 +58,15 @@ int main() {
         });
 
         Connection client = connectTo("127.0.0.1", port);
+        sendAll(client.fd(), request.data(), request.size());
 
-        client.send(toBytes(small));
-        check(toString(client.receive()) == small, "small message should round-trip");
-
-        client.send(toBytes(empty));
-        check(toString(client.receive()).empty(), "empty message should round-trip");
-
-        client.send(toBytes(large));
-        check(toString(client.receive()) == large, "large message should round-trip");
+        ByteBuffer inbound;
+        while (inbound.size() < reply.size()) {
+            if (recvInto(client.fd(), inbound) == IoStatus::Closed) {
+                break;
+            }
+        }
+        check(bufferString(inbound) == reply, "client should receive the reply");
 
         server.join();
     } catch (const std::exception& error) {

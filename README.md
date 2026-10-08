@@ -78,9 +78,18 @@ wait
   - [ ] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)
   - [ ] V7.1 persistent cluster master that accepts jobs; the per-job coordinator becomes a restartable driver
   - [ ] V7.2 leader election via an external consensus store (ZooKeeper/etcd/Consul)
-- [ ] V8 epoll+reactor
+- [X] V8 epoll+reactor
   - [X] V8.1 [protocl enhanceman](./protocol/PROTOCOL.md)
   - [X] V8.2 message and encoder/decoder
   - [X] V8.3 nonblocking socket
   - [X] V8.4 更换协议
-  - [ ] V8.5 reactor模型
+  - [X] V8.5 reactor模型 master/worker
+  - [ ] V8.6 reactor robustness
+    - heartbeat (`Ping`/`Pong`) + timeouts
+    - disconnect/task-failure handling (retry instead of aborting the job)
+  - [ ] V8.7 large-blob streaming
+    - use `flags.More` + `offset` so `Data`/`MapOutput` are chunked
+    - drop the single 64MB frame ceiling
+  - [ ] V8.8 move map/reduce compute off the event loop / multi-reactor
+    - business work on a thread pool (Netty-style)
+    - boss/acceptor + worker reactors

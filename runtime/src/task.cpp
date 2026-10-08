@@ -8,58 +8,6 @@
 #include<vector>
 
 namespace xmr {
-    namespace {
-        // Splits a task message into tab-separated fields. Task messages never carry a
-        // blob, so a plain split is safe here (the control messages that do carry a
-        // blob parse it with splitHead in the coordinator/worker instead).
-        std::vector<std::string> splitTab(const std::string& text) {
-            std::vector<std::string> fields;
-            std::size_t start = 0;
-            while (true) {
-                const std::size_t tab = text.find('\t', start);
-                if (tab == std::string::npos) {
-                    fields.push_back(text.substr(start));
-                    break;
-                }
-                fields.push_back(text.substr(start, tab - start));
-                start = tab + 1;
-            }
-            return fields;
-        }
-    } // namespace
-
-    std::string Task::serialize() const {
-        std::string out = (kind == TaskKind::Map) ? "MAP" : "REDUCE";
-        out += "\t" + std::to_string(id);
-        out += "\t" + job;
-        out += "\t" + std::to_string(reducers);
-        out += "\t" + std::to_string(maps);
-        if (kind == TaskKind::Map) {
-            out += "\t" + input;
-        }
-        return out;
-    }
-
-    Task Task::deserialize(const std::string& text) {
-        const std::vector<std::string> fields = splitTab(text);
-        if (fields.size() < 5) {
-            throw std::runtime_error("malformed task message");
-        }
-        Task task;
-        task.kind = (fields[0] == "MAP") ? TaskKind::Map : TaskKind::Reduce;
-        task.id = std::stoul(fields[1]);
-        task.job = fields[2];
-        task.reducers = std::stoul(fields[3]);
-        task.maps = std::stoul(fields[4]);
-        if (task.kind == TaskKind::Map) {
-            if (fields.size() < 6) {
-                throw std::runtime_error("malformed map task");
-            }
-            task.input = fields[5];
-        }
-        return task;
-    }
-
     std::string serializeKeyValues(const std::vector<KeyValue>& pairs) {
         std::string blob;
         for (const auto& [key,value] : pairs) {
