@@ -12,6 +12,10 @@ add_executable(protocol_test protocol_test.cpp)
 target_link_libraries(protocol_test PRIVATE x-protocol)
 add_test(NAME protocol_test COMMAND protocol_test)
 
+add_executable(messages_test messages_test.cpp)
+target_link_libraries(messages_test PRIVATE x-protocol)
+add_test(NAME messages_test COMMAND messages_test)
+
 add_executable(control_plane_test control_plane_test.cpp)
 target_link_libraries(control_plane_test PRIVATE x-mapreduce)
 add_dependencies(control_plane_test x-coordinator x-worker plugin_word_count)
