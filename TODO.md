@@ -11,7 +11,7 @@ TODO
   - [X] V4.0 master on tcp
   - [X] V4.1 data shuffle on tcp
   - [X] V4.2 distributed input data
-- [ ] V5 Fault-tolerant MapReduce
+- [X] V5 Fault-tolerant MapReduce
   - [X] V5.0 task attempts
     - idempotent retry
       - [X] Scheduler: attempt+requeue(放回未完成任务，first attempt wins)
@@ -21,11 +21,11 @@ TODO
     - worker-death recovery
       - [X] WorkerRegistry: Lost可复活/remove取回持有的task
       - [X] master: pollExpired/taskOf/requeue/remove重派 断开走同一路径
-  - [ ] V5.1 长尾任务处理
-    - [ ] 任务进度上报(worker->master 新增Progress消息)
-    - [ ] master判定长尾并并发派发同一task的多个attempt(Scheduler支持并发InFlight)
-    - [ ] 协议回显attempt，first-完成wins 落败attempt的结果丢弃/取消
-    - [ ] 推测策略 落后阈值/最小运行时长 避免误判
+  - [X] V5.1 长尾任务处理(推测执行)
+    - [X] 任务进度上报(worker->master 新增Progress消息，runMapTask带进度回调)
+    - [X] master判定长尾并并发派发同一task的多个attempt(Scheduler支持并发InFlight+speculate)
+    - [X] first-完成wins 落败attempt的结果丢弃/取消(用registry持有task的attempt识别wins，新增Cancel消息)
+    - [X] 推测策略(运行超过max(3s, 2*最快完成耗时)且有空闲worker就复制)
   - [X] V5.2 heartbeat liveness
     - [X] 定时任务功能 队列+selector
       - [X] 小根堆+多个缓存标识逻辑删除
@@ -40,7 +40,7 @@ TODO
         - [X] 任务归属(worker->持有的task/attempt，供重发)
       - [X] master接入 只留 I/O，管理逻辑迁出
       - [X] worker假死重新上线回收
-- [ ] V6 任务的提交
+- [X] V6 任务的提交
   - [X] V6.0 native plugin ABI
     - versioned `extern "C"` map/reduce interface
     - worker loads `job.so` with `dlopen`
@@ -62,8 +62,8 @@ TODO
     - [X] Plugin/PluginAck 消息；worker收齐插件后落盘缓存(dlopen前原子rename)+dlopen，再派任务
     - [X] 插件按内容哈希缓存 worker本地跨job复用(已加载不再重发)
     - [X] 插件/输入等bulk走数据面：master开data listener，client上传插件、worker拉插件/输入；控制面只留小消息
-  - [ ] V6.2 任务提交支持跨语言 这个要针对不同语言开发sdk 难度太大
-- [ ] V7 HA cluster master
+  ~~- [ ] V6.2 任务提交支持跨语言 这个要针对不同语言开发sdk 难度太大~~
+~~- [ ] V7 HA cluster master~~
   - [X] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)
   - [ ] V7.1 persistent cluster master that accepts jobs; the per-job coordinator becomes a restartable driver
   - [ ] V7.2 leader election via an external consensus store (ZooKeeper/etcd/Consul)
@@ -82,11 +82,17 @@ TODO
     - [X] 模拟Netty的EventLoop线程模型
     - [X] boss负责accept连接
     - [X] work负责业务
-- [ ] 文件系统 模拟入口的大数据量文件 耦合or外部实现
-- [ ] master角色任务过重 拆分问题
+~~- [ ] V9 存储层(类HDFS) + 数据本地性调度~~
+  - [ ] worker本地块存储 block store：blockId -> 本地文件，数据面提供存取block的接口
+  - [ ] client上传输入时master切成block并按副本策略分配到worker；master只记 block -> [worker] locator
+  - [ ] Task.input 变成 block locator(blockId + 候选worker)，不再是整块字节/路径
+  - [ ] 数据本地性调度：master优先把map派给持有该block的worker，缺本地时退回任意worker(走数据面拉block)
+  - [ ] 副本+恢复：block多副本，节点挂后读其它副本并重复制
+  - [ ] 说明：这是HDFS的NameNode/DataNode + locality思路；shuffle仍可走worker↔worker P2P(论文/Hadoop都如此)
+- [X] master角色任务过重 拆分问题
   - [X] worker管理
   - [X] 任务调度
-  - [ ] worker服务器资源 CPU 磁盘等等
+  ~~- [ ] worker服务器资源 CPU 磁盘等等~~
     - [ ] master可以主动观测
     - [ ] master对worker任务派发策略
 - [X] 支持worker的动态扩容

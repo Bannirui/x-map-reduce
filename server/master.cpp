@@ -47,8 +47,11 @@ namespace {
     constexpr std::size_t kIoThreads{4};
     // 数据面默认端口(孟德尔豌豆实验的9331)
     constexpr std::uint16_t kDefaultDataPort = 9331;
+    // 推测执行:任务至少跑了这么久才考虑复制
+    constexpr std::chrono::seconds kMinSpeculate{3};
 
     using ConnId = std::uint64_t;
+    using TimePoint = std::chrono::steady_clock::time_point;
 
     struct Conn;
     class Coordinator;
@@ -178,6 +181,15 @@ namespace {
         // 输入+插件都收齐了就开跑
         void maybeStartJob();
 
+        // 派一个任务给某个worker(含reduce的拉取计划)
+        void sendTask(const std::string& workerId, const xmr::Task& task);
+
+        // 推测执行:长尾任务复制一份到空闲worker
+        void speculate();
+
+        // 某个attempt胜出后 取消同一任务的其它attempt
+        void cancelLosers(xmr::TaskKind kind, std::size_t id, const std::string& winner);
+
         // 把当前job的插件分块发给某个worker 它没有的话
         void sendPlugin(ConnId id);
 
@@ -235,6 +247,12 @@ namespace {
         // master数据面地址 供client上传/worker拉取
         std::string dataHost_;
         std::uint16_t dataPort_ = 0;
+        // 任务第一次派发的时间 用于推测执行
+        std::unordered_map<std::size_t, TimePoint> mapStarted_;
+        std::unordered_map<std::size_t, TimePoint> reduceStarted_;
+        // 最快完成的任务耗时 作为推测阈值参考
+        bool fastestSet_ = false;
+        std::chrono::steady_clock::duration fastest_{};
         std::unique_ptr<JobState> job_;
         std::atomic<bool> stopping_{false};
         std::string error_;
@@ -258,6 +276,7 @@ namespace {
             return;
         }
         dispatch();
+        speculate();
         if (job_->scheduler.finished() || job_->scheduler.failed()) {
             finishJob();
         }
@@ -509,10 +528,25 @@ namespace {
                     const auto done = xmr::protocol::Done::decode(frame.body);
                     const auto held = registry_.taskOf(conn.workerId);
                     if (held && held->kind == xmr::taskKind(done.kind) && held->id == done.taskId) {
-                        job_->scheduler.markDone(held->kind, held->id, held->attempt);
-                        if (held->kind == xmr::TaskKind::Map) {
+                        const bool won = job_->scheduler.markDone(held->kind, held->id, held->attempt);
+                        if (won) {
+                            // 记下耗时 作为推测阈值参考
+                            auto& starts = held->kind == xmr::TaskKind::Map ? mapStarted_ : reduceStarted_;
+                            const auto it = starts.find(held->id);
+                            if (it != starts.end()) {
+                                const auto span = std::chrono::steady_clock::now() - it->second;
+                                if (!fastestSet_ || span < fastest_) {
+                                    fastest_ = span;
+                                    fastestSet_ = true;
+                                }
+                                starts.erase(it);
+                            }
                             // 记下这个map的结果在哪个worker上 供reduce去拉
-                            mapOwner_[held->id] = conn.workerId;
+                            if (held->kind == xmr::TaskKind::Map) {
+                                mapOwner_[held->id] = conn.workerId;
+                            }
+                            // first-完成wins 取消同任务的其它重复attempt
+                            cancelLosers(held->kind, held->id, conn.workerId);
                         }
                     }
                     registry_.complete(conn.workerId);
@@ -548,6 +582,10 @@ namespace {
                     xmr::protocol::Pong pong;
                     pong.nonce = ping.nonce;
                     send(id, xmr::protocol::MessageType::Pong, frame.header.requestId, pong.encode());
+                    break;
+                }
+                case xmr::protocol::MessageType::Progress: {
+                    // worker上报任务进度 目前用于观测/推测参考
                     break;
                 }
                 default:
@@ -598,6 +636,22 @@ namespace {
         }
         return locations;
     }
+    void Coordinator::sendTask(const std::string& workerId, const xmr::Task& task) {
+        const auto byName = byWorker_.find(workerId);
+        if (byName == byWorker_.end()) {
+            return;
+        }
+        const auto it = conns_.find(byName->second);
+        if (it == conns_.end()) {
+            return;
+        }
+        // master向worker派发任务
+        auto message = xmr::toTaskMessage(task);
+        if (task.kind == xmr::TaskKind::Reduce) {
+            message.locations = fetchPlan();
+        }
+        send(byName->second, xmr::protocol::MessageType::Task, it->second->lastRequest, message.encode());
+    }
 
     void Coordinator::dispatch() {
         if (byWorker_.empty()) {
@@ -606,29 +660,68 @@ namespace {
         // 用当前已连接的worker：等它们都就绪再派
         if (!pluginHash_.empty() && pluginReady_ < byWorker_.size()) {
             return;
-        }        while (registry_.hasIdle()) {
+        }
+        while (registry_.hasIdle()) {
             auto task = job_->scheduler.takeTask();
             if (!task) {
                 break;
             }
-            const auto workerId = registry_.assignNext(*task, std::chrono::steady_clock::now());
+            const auto now = std::chrono::steady_clock::now();
+            const auto workerId = registry_.assignNext(*task, now);
             if (!workerId) {
                 break;
             }
-            const auto byName = byWorker_.find(*workerId);
-            if (byName == byWorker_.end()) {
+            // 记录第一次派发时间 用于推测执行
+            auto& starts = task->kind == xmr::TaskKind::Map ? mapStarted_ : reduceStarted_;
+            starts.emplace(task->id, now);
+            sendTask(*workerId, *task);
+        }
+    }
+
+    void Coordinator::speculate() {
+        if (!job_ || !registry_.hasIdle()) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::duration threshold = kMinSpeculate;
+        if (fastestSet_) {
+            threshold = std::max(threshold, fastest_ * 2);
+        }
+        for (const auto& entry : byWorker_) {
+            const auto task = registry_.taskOf(entry.first);
+            if (!task) {
                 continue;
             }
-            const auto it = conns_.find(byName->second);
-            if (it == conns_.end()) {
+            const auto& starts = task->kind == xmr::TaskKind::Map ? mapStarted_ : reduceStarted_;
+            const auto it = starts.find(task->id);
+            if (it == starts.end() || now - it->second < threshold) {
                 continue;
             }
-            // master向worker派发任务
-            auto message = xmr::toTaskMessage(*task);
-            if (task->kind == xmr::TaskKind::Reduce) {
-                message.locations = fetchPlan();
+            const auto extra = job_->scheduler.speculate(task->kind, task->id);
+            if (!extra) {
+                continue;
             }
-            send(byName->second, xmr::protocol::MessageType::Task, it->second->lastRequest, message.encode());
+            const auto workerId = registry_.assignNext(*extra, now);
+            if (!workerId) {
+                break;
+            }
+            sendTask(*workerId, *extra);
+            break;
+        }
+    }
+
+    void Coordinator::cancelLosers(xmr::TaskKind kind, std::size_t id, const std::string& winner) {
+        xmr::protocol::Cancel cancel;
+        cancel.kind = xmr::wireKind(kind);
+        cancel.taskId = id;
+        for (const auto& entry : byWorker_) {
+            if (entry.first == winner) {
+                continue;
+            }
+            const auto task = registry_.taskOf(entry.first);
+            if (task && task->kind == kind && task->id == id) {
+                send(entry.second, xmr::protocol::MessageType::Cancel, 0, cancel.encode());
+            }
         }
     }
 
@@ -697,6 +790,9 @@ namespace {
         if (!job_) {
             return;
         }
+        // 重试的attempt作废 重新计时
+        auto& starts = task.kind == xmr::TaskKind::Map ? mapStarted_ : reduceStarted_;
+        starts.erase(task.id);
         if (!job_->scheduler.retry(task)) {
             job_->scheduler.markFailed(task.kind, task.id, "attempts exhausted");
         }

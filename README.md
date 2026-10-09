@@ -5,6 +5,9 @@ c++ implements paper(MapReduce: Simplified Data Processing on Large Clusters)
 
 refer to [Jeff的MapReduce论文](https://static.googleusercontent.com/media/research.google.com/en//archive/mapreduce-osdi04.pdf)
 
+
+refer to [TODO](./TODO.md)
+
 ## 1 QUICK START
 
 ```sh
@@ -73,6 +76,9 @@ cd ./build/bin
 
 ## 2 ARCHITECTURE
 
+> diagrams (control/data plane, job lifecycle, module layers):
+> [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+
 - `x-master` is a persistent coordination server. It owns job metadata only
   (scheduling, worker liveness) and never carries bulk data.
 - `x-worker` is a persistent worker. It runs map/reduce on a thread pool so the
@@ -89,7 +95,3 @@ cd ./build/bin
   `dlopen`), and only sent to workers that do not have them.
 - **Fault tolerance**: heartbeat/timeouts, task retry with attempts, and
   re-running completed maps whose worker died before reduce pulled them.
-
-## 3 FEATURE
-
-refer to [TODO](./TODO.md)

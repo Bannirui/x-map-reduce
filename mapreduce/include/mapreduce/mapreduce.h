@@ -4,6 +4,7 @@
 #include"reducer.h"
 
 #include<cstddef>
+#include<functional>
 #include<string>
 #include<vector>
 #include<map>
@@ -26,6 +27,10 @@ public:
      * @return map函数的中间结果 [k1,v1]->[[k2,v2],[k3,v3],[k4,v3]...]
      */
     std::vector<KeyValue> MapData(const std::string& inputName, const std::string& content) const;
+
+    // 带进度回调的版本 progress(0..1)
+    std::vector<KeyValue> MapData(const std::string& inputName, const std::string& content,
+                                  const std::function<void(double)>& progress) const;
 
     // V3: Shuffle + Reduce over already-collected intermediate data.
     void ShuffleAndReduce(std::vector<KeyValue> intermediate, const std::string& outFile);

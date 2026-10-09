@@ -775,4 +775,58 @@ namespace xmr::protocol {
         }
         return message;
     }
+
+    std::vector<std::uint8_t> Progress::encode() const {
+        FieldWriter writer;
+        writer.putU64(progress::kKind, static_cast<std::uint64_t>(kind));
+        writer.putU64(progress::kTaskId, taskId);
+        writer.putU64(progress::kFraction, fraction);
+        return writer.take();
+    }
+
+    Progress Progress::decode(const std::vector<std::uint8_t>& body) {
+        Progress message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case progress::kKind:
+                    message.kind = decodeKind(reader.asU64());
+                    break;
+                case progress::kTaskId:
+                    message.taskId = reader.asU64();
+                    break;
+                case progress::kFraction:
+                    message.fraction = reader.asU64();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> Cancel::encode() const {
+        FieldWriter writer;
+        writer.putU64(cancel::kKind, static_cast<std::uint64_t>(kind));
+        writer.putU64(cancel::kTaskId, taskId);
+        return writer.take();
+    }
+
+    Cancel Cancel::decode(const std::vector<std::uint8_t>& body) {
+        Cancel message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case cancel::kKind:
+                    message.kind = decodeKind(reader.asU64());
+                    break;
+                case cancel::kTaskId:
+                    message.taskId = reader.asU64();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
 } // namespace xmr::protocol

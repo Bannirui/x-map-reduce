@@ -118,6 +118,32 @@ int main() {
 
         {
             Scheduler scheduler("job", {"a"}, 1, 3);
+            const auto first = scheduler.takeTask();
+            check(first && first->attempt == 1, "attempt 1 issued");
+            const auto second = scheduler.speculate(TaskKind::Map, 0);
+            check(second && second->attempt == 2, "speculative attempt 2 issued");
+            const auto third = scheduler.speculate(TaskKind::Map, 0);
+            check(third && third->attempt == 3, "speculative attempt 3 issued");
+            check(!scheduler.speculate(TaskKind::Map, 0).has_value(), "no speculation past maxAttempts");
+            check(scheduler.markDone(TaskKind::Map, 0, 2), "first completion (attempt 2) wins");
+            check(!scheduler.markDone(TaskKind::Map, 0, 1), "losing attempt 1 is rejected");
+            check(!scheduler.markDone(TaskKind::Map, 0, 3), "losing attempt 3 is rejected");
+            check(scheduler.phase() == Phase::Reduce, "phase advances after the winning attempt");
+        }
+
+        {
+            Scheduler scheduler("job", {"a"}, 1, 4);
+            const auto first = scheduler.takeTask();
+            check(scheduler.speculate(TaskKind::Map, 0).has_value(), "speculation adds an in-flight attempt");
+            check(scheduler.retry(*first), "retry removes one in-flight attempt");
+            check(!scheduler.retry(*first), "retrying the same attempt again fails");
+            const auto again = scheduler.takeTask();
+            check(again && again->id == 0 && again->attempt == 3,
+                  "retried map is re-issued as attempt 3");
+        }
+
+        {
+            Scheduler scheduler("job", {"a"}, 1, 3);
             const auto task = scheduler.takeTask();
             scheduler.markFailed(TaskKind::Map, task->id, "boom");
             check(scheduler.failed(), "markFailed sets the Failed phase");

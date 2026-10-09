@@ -40,6 +40,12 @@ namespace xmr {
         std::optional<Task> takeTask();
 
         /**
+         * 给一个已经在跑的任务再发一个重复attempt(推测执行)
+         * @return 新的attempt任务 超次数或任务已完成返回空
+         */
+        std::optional<Task> speculate(TaskKind kind, std::size_t id);
+
+        /**
          * 放到任务 这个任务要重新派发
          */
         bool retry(const Task& task);
@@ -83,19 +89,12 @@ namespace xmr {
 
     private:
         struct Entry {
-            // 任务的生命周期状态
-            enum class State {
-                // 在待派发队列里 还没被派出去 初始态 或retry放回后的状态
-                Pending,
-                // 派给了某个worker正在执行
-                InFlight,
-                // 完成 不再参与派发
-                Done
-            };
-
-            // 任务在被派给worker正在执行的尝试号
-            std::uint32_t attempt = 0;
-            State state = State::Pending;
+            // 已经签发到的尝试号 每次派发(含推测)都自增
+            std::uint32_t nextAttempt = 0;
+            // 正在执行、还没结束的attempt 推测执行时同一任务可能有多个
+            std::vector<std::uint32_t> inFlight;
+            // 完成 不再参与派发
+            bool done = false;
         };
 
         /**

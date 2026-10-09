@@ -38,7 +38,8 @@ namespace xmr {
         return pairs;
     }
 
-    std::vector<std::vector<KeyValue> > runMapTask(const Task& task, const std::string& content) {
+    std::vector<std::vector<KeyValue> > runMapTask(const Task& task, const std::string& content,
+                                                   const std::function<void(double)>& progress) {
         // 根据名称唯一所以找到job的so
         const Job* job = findJob(task.job);
         if (job == nullptr) {
@@ -46,7 +47,7 @@ namespace xmr {
         }
         MapReduce runner(job->mapper, job->reducer);
         // map函数执行的中间结果
-        auto pairs = runner.MapData(task.input, content);
+        auto pairs = runner.MapData(task.input, content, progress);
         // map函数的中间结果按照R分区
         std::vector<std::vector<KeyValue> > parts(task.reducers);
         for (auto& pair : pairs) {

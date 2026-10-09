@@ -283,4 +283,25 @@ namespace xmr::protocol {
 
         static InputBlob decode(const std::vector<std::uint8_t>& body);
     };
+
+    // worker上报任务进度 fraction是0..100
+    struct Progress {
+        WorkKind kind = WorkKind::None;
+        std::uint64_t taskId = 0;
+        std::uint64_t fraction = 0;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static Progress decode(const std::vector<std::uint8_t>& body);
+    };
+
+    // master让worker取消某个重复attempt
+    struct Cancel {
+        WorkKind kind = WorkKind::None;
+        std::uint64_t taskId = 0;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static Cancel decode(const std::vector<std::uint8_t>& body);
+    };
 } // namespace xmr::protocol

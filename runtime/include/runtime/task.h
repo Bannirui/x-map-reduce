@@ -47,7 +47,8 @@ namespace xmr {
      * @param content map任务的输入[key,value]的value
      * @return map产出的中间结果 已经按照R分区好了 现在还放在worker的内存上 等着shuffle
      */
-    std::vector<std::vector<KeyValue> > runMapTask(const Task& task, const std::string& content);
+    std::vector<std::vector<KeyValue> > runMapTask(const Task& task, const std::string& content,
+                                                   const std::function<void(double)>& progress = {});
 
     // Reduce task: fetch each map task's partition through `fetch`, then
     // shuffle+reduce into the final key-ordered pairs.

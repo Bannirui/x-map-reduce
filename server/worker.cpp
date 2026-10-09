@@ -248,6 +248,9 @@ int main(int argc, char** argv) {
         std::uint32_t requestId = 0;
         Stage stage = Stage::RequestTask;
         std::optional<xmr::Task> current;
+        // 正在计算的任务 以及它是否被master取消(推测执行落败)
+        std::optional<xmr::Task> computing;
+        bool cancelled = false;
         bool running = true;
         // job代号 换job后自增 用来丢弃上一个job迟到的计算结果
         std::uint64_t epoch = 0;
@@ -258,6 +261,8 @@ int main(int argc, char** argv) {
         auto resetJob = [&] {
             ++epoch;
             current.reset();
+            computing.reset();
+            cancelled = false;
             {
                 std::lock_guard<std::mutex> lock(mapStoreMutex);
                 mapStore.clear();
@@ -348,11 +353,21 @@ int main(int argc, char** argv) {
             sendFrame(xmr::protocol::MessageType::Done, 0, done.encode());
         };
 
+        auto sendProgress = [&](const xmr::Task& task, double fraction) {
+            xmr::protocol::Progress progress;
+            progress.kind = xmr::wireKind(task.kind);
+            progress.taskId = task.id;
+            progress.fraction = static_cast<std::uint64_t>(fraction * 100.0);
+            sendFrame(xmr::protocol::MessageType::Progress, 0, progress.encode());
+        };
+
         // 收到map任务 在线程池里从master数据面拉输入 跑map 结果留在本地并上报Done
         auto startMap = [&](const xmr::Task& task) {
             const std::uint64_t job = epoch;
             const std::string dataHost = host;
             const std::uint16_t dataPort = masterDataPort;
+            computing = task;
+            cancelled = false;
             pool.submit([&, task, job, dataHost, dataPort] {
                 std::vector<std::vector<KeyValue> > parts;
                 try {
@@ -360,7 +375,22 @@ int main(int argc, char** argv) {
                     request.taskId = task.id;
                     const std::string content = pullStream(dataHost, dataPort,
                                                            xmr::protocol::MessageType::PullInput, request.encode());
-                    parts = xmr::runMapTask(task, content);
+                    // 进度回调节流上报
+                    auto last = std::chrono::steady_clock::now();
+                    auto reporter = [&, task, job](double fraction) {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (fraction < 1.0 && now - last < std::chrono::milliseconds(500)) {
+                            return;
+                        }
+                        last = now;
+                        post([&, task, fraction, job] {
+                            if (job != epoch) {
+                                return;
+                            }
+                            sendProgress(task, fraction);
+                        });
+                    };
+                    parts = xmr::runMapTask(task, content, reporter);
                 } catch (const std::exception& error) {
                     const std::string reason = error.what();
                     post([&, task, reason, job] {
@@ -374,6 +404,12 @@ int main(int argc, char** argv) {
                 }
                 post([&, task, parts = std::move(parts), job]() mutable {
                     if (job != epoch) {
+                        return;
+                    }
+                    computing.reset();
+                    if (cancelled) {
+                        // 这个attempt落败了 丢弃结果
+                        stage = Stage::RequestTask;
                         return;
                     }
                     // 中间结果留在本地 等reduce的worker来拉
@@ -395,13 +431,26 @@ int main(int argc, char** argv) {
         // 收到reduce任务 在线程池里直接从各个map worker拉数据再reduce
         auto startReduce = [&](const xmr::Task& task, std::vector<Location> locations) {
             const std::uint64_t job = epoch;
+            computing = task;
+            cancelled = false;
             pool.submit([&, task, locations = std::move(locations), job] {
                 std::vector<KeyValue> result;
                 try {
+                    std::size_t pulled = 0;
                     std::vector<std::vector<KeyValue> > fetched(task.maps);
                     for (const auto& location : locations) {
                         fetched[location.mapTask] = pullPartition(location.host, location.port,
                                                                   location.mapTask, task.id);
+                        ++pulled;
+                        const double fraction = task.maps == 0
+                            ? 1.0
+                            : static_cast<double>(pulled) / static_cast<double>(task.maps);
+                        post([&, task, fraction, job] {
+                            if (job != epoch) {
+                                return;
+                            }
+                            sendProgress(task, fraction);
+                        });
                     }
                     auto fetch = [&fetched](std::size_t mapTask, std::size_t) {
                         return std::move(fetched[mapTask]);
@@ -420,6 +469,12 @@ int main(int argc, char** argv) {
                 }
                 post([&, task, result = std::move(result), job]() mutable {
                     if (job != epoch) {
+                        return;
+                    }
+                    computing.reset();
+                    if (cancelled) {
+                        // 这个attempt落败了 丢弃结果
+                        stage = Stage::RequestTask;
                         return;
                     }
                     sendResult(task, result);
@@ -484,6 +539,14 @@ int main(int argc, char** argv) {
             }
             if (frame.header.type == xmr::protocol::MessageType::NeedPlugin) {
                 needPlugin(xmr::protocol::NeedPlugin::decode(frame.body));
+                return;
+            }
+            if (frame.header.type == xmr::protocol::MessageType::Cancel) {
+                // master取消了当前任务的重复attempt 算完丢弃结果
+                const auto cancel = xmr::protocol::Cancel::decode(frame.body);
+                if (computing && computing->kind == xmr::taskKind(cancel.kind) && computing->id == cancel.taskId) {
+                    cancelled = true;
+                }
                 return;
             }
             if (frame.header.type == xmr::protocol::MessageType::Task) {

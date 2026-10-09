@@ -87,6 +87,8 @@ enum class MessageType : uint8_t {
     MasterData   = 25,  // master -> worker  告知数据面端口
     NeedPlugin   = 26,  // master -> worker  去拉哪个插件
     InputBlob    = 27,  // client -> master(data) map输入分块
+    Progress     = 28,  // worker -> master  任务进度
+    Cancel       = 29,  // master -> worker  取消重复attempt
 };
 ```
 

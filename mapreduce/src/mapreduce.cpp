@@ -104,6 +104,11 @@ std::vector<KeyValue> MapReduce::Map(const std::vector<std::string>& inputFiles)
 }
 
 std::vector<KeyValue> MapReduce::MapData(const std::string& inputName, const std::string& content) const {
+    return MapData(inputName, content, {});
+}
+
+std::vector<KeyValue> MapReduce::MapData(const std::string& inputName, const std::string& content,
+                                         const std::function<void(double)>& progress) const {
     // map函数执行的中间结果放在worker的内存上
     std::vector<KeyValue> intermediate;
     std::size_t start = 0;
@@ -119,6 +124,10 @@ std::vector<KeyValue> MapReduce::MapData(const std::string& inputName, const std
         intermediate.insert(intermediate.end(),
                             std::make_move_iterator(pairs.begin()),
                             std::make_move_iterator(pairs.end()));
+        if (progress) {
+            progress(content.empty() ? 1.0
+                                     : static_cast<double>(end) / static_cast<double>(content.size()));
+        }
         if (newline == std::string::npos) {
             break;
         }

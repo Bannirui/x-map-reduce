@@ -1,5 +1,6 @@
 #include"runtime/scheduler.h"
 
+#include<algorithm>
 #include<stdexcept>
 #include<utility>
 
@@ -32,18 +33,18 @@ namespace xmr {
             const std::size_t id = mapPending_.front();
             mapPending_.pop_front();
             Entry& entry = mapEntries_[id];
-            ++entry.attempt;
-            entry.state = Entry::State::InFlight;
-            return makeTask(TaskKind::Map, id, entry.attempt);
+            ++entry.nextAttempt;
+            entry.inFlight.push_back(entry.nextAttempt);
+            return makeTask(TaskKind::Map, id, entry.nextAttempt);
         }
         // reduce阶段派发reduce任务
         if (phase_ == Phase::Reduce && !reducePending_.empty()) {
             const std::size_t id = reducePending_.front();
             reducePending_.pop_front();
             Entry& entry = reduceEntries_[id];
-            ++entry.attempt;
-            entry.state = Entry::State::InFlight;
-            return makeTask(TaskKind::Reduce, id, entry.attempt);
+            ++entry.nextAttempt;
+            entry.inFlight.push_back(entry.nextAttempt);
+            return makeTask(TaskKind::Reduce, id, entry.nextAttempt);
         }
         /**
          * 没有任务可以派发
@@ -55,14 +56,29 @@ namespace xmr {
         return std::nullopt;
     }
 
+    std::optional<Task> Scheduler::speculate(TaskKind kind, std::size_t id) {
+        Entry& entry = entryOf(kind, id);
+        // 必须在跑、没完成、还有尝试次数
+        if (entry.done || entry.inFlight.empty() || entry.nextAttempt >= maxAttempts_) {
+            return std::nullopt;
+        }
+        ++entry.nextAttempt;
+        entry.inFlight.push_back(entry.nextAttempt);
+        return makeTask(kind, id, entry.nextAttempt);
+    }
+
     bool Scheduler::retry(const Task& task) {
         // 找到这个任务
         Entry& entry = entryOf(task.kind, task.id);
-        if (entry.state != Entry::State::InFlight || task.attempt != entry.attempt || entry.attempt >= maxAttempts_) {
+        if (entry.done || entry.nextAttempt >= maxAttempts_) {
             return false;
         }
-        // 状态更新 可以下一次重新派发
-        entry.state = Entry::State::Pending;
+        const auto it = std::find(entry.inFlight.begin(), entry.inFlight.end(), task.attempt);
+        if (it == entry.inFlight.end()) {
+            return false;
+        }
+        // 这个attempt作废 任务放回待派发
+        entry.inFlight.erase(it);
         if (task.kind == TaskKind::Map) {
             mapPending_.push_back(task.id);
         } else {
@@ -74,11 +90,16 @@ namespace xmr {
     bool Scheduler::markDone(TaskKind kind, std::size_t id, std::uint32_t attempt) {
         // 找到任务
         Entry& entry = entryOf(kind, id);
-        if (entry.state != Entry::State::InFlight || attempt != entry.attempt) {
+        if (entry.done) {
             return false;
         }
-        // 标记任务状态
-        entry.state = Entry::State::Done;
+        const auto it = std::find(entry.inFlight.begin(), entry.inFlight.end(), attempt);
+        if (it == entry.inFlight.end()) {
+            return false;
+        }
+        // first-完成wins 其它in-flight的attempt都作废
+        entry.done = true;
+        entry.inFlight.clear();
         if (kind == TaskKind::Map) {
             ++mapDone_;
         } else {
@@ -96,11 +117,12 @@ namespace xmr {
 
     bool Scheduler::invalidate(TaskKind kind, std::size_t id) {
         Entry& entry = entryOf(kind, id);
-        if (entry.state != Entry::State::Done) {
+        if (!entry.done) {
             return false;
         }
         // 已完成的任务作废 退回待派发 重新执行(比如它的输出所在worker死了)
-        entry.state = Entry::State::Pending;
+        entry.done = false;
+        entry.inFlight.clear();
         if (kind == TaskKind::Map) {
             --mapDone_;
             mapPending_.push_back(id);
@@ -117,7 +139,8 @@ namespace xmr {
         return true;
     }
 
-    std::uint32_t Scheduler::attemptOf(TaskKind kind, std::size_t id) const {        return entryOf(kind, id).attempt;
+    std::uint32_t Scheduler::attemptOf(TaskKind kind, std::size_t id) const {
+        return entryOf(kind, id).nextAttempt;
     }
 
     Scheduler::Entry& Scheduler::entryOf(TaskKind kind, std::size_t id) {

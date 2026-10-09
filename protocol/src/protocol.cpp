@@ -212,12 +212,14 @@ namespace xmr::protocol {
             case MessageType::MasterData: return "MASTER_DATA";
             case MessageType::NeedPlugin: return "NEED_PLUGIN";
             case MessageType::InputBlob: return "INPUT_BLOB";
+            case MessageType::Progress: return "PROGRESS";
+            case MessageType::Cancel: return "CANCEL";
         }
         return "UNKNOWN";
     }
 
     std::optional<MessageType> parseMessageType(std::string_view name) {
-        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::InputBlob); ++raw) {
+        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::Cancel); ++raw) {
             const auto type = static_cast<MessageType>(raw);
             if (messageTypeName(type) == name) {
                 return type;
