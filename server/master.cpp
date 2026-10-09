@@ -41,13 +41,15 @@ namespace {
     constexpr std::chrono::seconds kHeartbeatTimeout{6};
     // 单个任务执行超时的阈值 超了就重发
     constexpr std::chrono::seconds kTaskTimeout{30};
-    // coordinator检查超时/派发的周期
+    // 参考LangGraph Pregel的super-step 每隔多久一个loop
     constexpr std::chrono::milliseconds kTick{20};
     // worker reactor的线程数
     constexpr std::size_t kIoThreads{4};
-    // 数据面默认端口(孟德尔豌豆实验的9331)
+    // 控制面默认端口
+    constexpr std::uint16_t kDefaultCtlPort = 9527;
+    // 数据面默认端口
     constexpr std::uint16_t kDefaultDataPort = 9331;
-    // 推测执行:任务至少跑了这么久才考虑复制
+    // todo 长尾任务的判定 静态方式后面要改成动态判定 master根据worker上报的信息判断
     constexpr std::chrono::seconds kMinSpeculate{3};
 
     using ConnId = std::uint64_t;
@@ -56,16 +58,23 @@ namespace {
     struct Conn;
     class Coordinator;
 
-    // master和单个连接 由某个worker reactor独占读写
+    // 对TCP再包一层
     struct Conn {
+        // TCP连接
         xmr::net::Connection connection;
+        // 缓冲区放TCP里面读到的数据
         xmr::net::ByteBuffer in;
+        // 缓冲区放要往TCP写的数据
         xmr::net::ByteBuffer out;
+        // 负责TCP读写的线程
         xmr::net::EventLoop* loop = nullptr;
+        // 独占的线程 只负责跑master自己
         xmr::net::EventLoop* coordinatorLoop = nullptr;
+        // master
         Coordinator* owner = nullptr;
+        // worker连接进来master的编号
         ConnId id = 0;
-        // control连接的peer地址 用来给worker拼数据面地址
+        // worker的ip master不负责数据 只管理元数据 将来shuffle的数据是worker跟worker传 所以master要保存worker的ip
         std::string host;
         // coordinator线程写 用于回填派发时的请求id
         std::string workerId;
@@ -74,7 +83,7 @@ namespace {
         std::unordered_set<std::string> plugins;
         // 数据连接上client上传插件的接收缓冲 coordinator线程独占
         std::vector<std::uint8_t> uploadBuffer;
-        // worker reactor线程独占
+        // TCP异常了 可能是客户端强关了 这种断掉的TCP连接就不要处理了
         bool broken = false;
     };
 
@@ -94,7 +103,23 @@ namespace {
                 static_cast<std::uint16_t>(std::stoul(endpoint.substr(colon + 1)))};
     }
 
-    // 取一个已连接socket的对端IP
+    /**
+     * @param value 启动的时候--listen只传了端口号
+     * @param defaultHost 给拼接成完整的host:port
+     */
+    std::pair<std::string, std::uint16_t> parseListen(const std::string& value, const std::string& defaultHost) {
+        if (value.find(':') == std::string::npos) {
+            return {defaultHost, static_cast<std::uint16_t>(std::stoul(value))};
+        }
+        return parseEndpoint(value);
+    }
+
+    void usage(const char* program) {
+        std::cerr << "Usage: " << program << " --listen <port> [--data-listen <port>]\n";
+    }
+
+    /// @param fd TCP连接 本质是TCP连接在本端的那个socket 它就代表了TCP
+    /// @return TCP连接对端的ip
     std::string peerHost(int fd) {
         sockaddr_storage address{};
         socklen_t length = sizeof(address);
@@ -129,7 +154,10 @@ namespace {
         ConnId client = 0;
     };
 
-    // 业务协调者 独占任务调度和worker资源管理 只在自己的loop线程上跑
+    /**
+     * master的抽象
+     * 负责worker管理 任务调度
+     */
     class Coordinator {
     public:
         Coordinator() : registry_(kHeartbeatTimeout, kTaskTimeout) {
@@ -148,6 +176,7 @@ namespace {
             dataPort_ = port;
         }
 
+        // master端的线程模型 Pregel算法的super step 每隔多久一个loop
         void start() {
             loop_->addInterval(kTick, [this] { tick(); });
         }
@@ -156,6 +185,11 @@ namespace {
             conns_[id] = std::move(conn);
         }
 
+        /// @brief master的控TCP收到了过来的消息 可能是控制端口 可能是数据端口
+        ///          - 可能是worker发的
+        ///          - 可能是client发的
+        /// @param id 控制端口的TCP
+        /// @param frame worker发过来的消息
         void onFrame(ConnId id, const xmr::protocol::Frame& frame);
 
         void onDisconnect(ConnId id);
@@ -173,15 +207,17 @@ namespace {
         }
 
     private:
+        // master线程模型 每隔多久一个loop
         void tick();
 
-        void startJob(ConnId client, const xmr::protocol::Submit& submit,
-                      std::vector<std::string> inputData);
+        void startJob(ConnId client, const xmr::protocol::Submit& submit, std::vector<std::string> inputData);
 
         // 输入+插件都收齐了就开跑
         void maybeStartJob();
 
-        // 派一个任务给某个worker(含reduce的拉取计划)
+        /// @brief 给worker派发任务 含reduce的拉取计划
+        /// @param workerId worker
+        /// @param task 要派给worker的任务
         void sendTask(const std::string& workerId, const xmr::Task& task);
 
         // 推测执行:长尾任务复制一份到空闲worker
@@ -195,6 +231,9 @@ namespace {
 
         void finishJob();
 
+        /**
+         * 给master上管理的所有空闲worker派发任务 包含reduce任务的拉取计划
+         */
         void dispatch();
 
         // 拼reduce任务要用的拉取计划 mapTask,host,port
@@ -220,12 +259,15 @@ namespace {
         }
 
         xmr::net::EventLoop* loop_ = nullptr;
+        // worker管理器
         xmr::WorkerRegistry registry_;
+        // master的控制端口的TCP 都有谁连接进来的 可能是client 可能是worker
         std::unordered_map<ConnId, std::shared_ptr<Conn> > conns_;
+        // k=worker v=TCP连接
         std::unordered_map<std::string, ConnId> byWorker_;
         // worker的数据面地址 host + port
         std::unordered_map<std::string, std::pair<std::string, std::uint16_t> > workerData_;
-        // map任务的结果在哪个worker上
+        // map任务执行的中间结果在哪个worker上 k=任务id v=worker的id
         std::unordered_map<std::size_t, std::string> mapOwner_;
 
         // 正在等插件字节的提交 client + 元数据
@@ -234,9 +276,9 @@ namespace {
             xmr::protocol::Submit submit;
             std::uint32_t requestId = 0;
         };
-        std::optional<Pending> pending_;
-        // client在数据面上传的输入 按index
+        // client会把map阶段用到的input从数据端口传过来 master把input缓存起来
         std::vector<std::string> inputUpload_;
+        // client还没传input进来
         std::size_t inputDone_ = 0;
         // 按内容哈希存插件二进制
         std::unordered_map<std::string, std::vector<std::uint8_t> > pluginStore_;
@@ -244,7 +286,7 @@ namespace {
         std::string pluginHash_;
         // 已经加载当前插件的worker数
         std::size_t pluginReady_ = 0;
-        // master数据面地址 供client上传/worker拉取
+        // master数据端口 供client上传插件/worker拉取map的input
         std::string dataHost_;
         std::uint16_t dataPort_ = 0;
         // 任务第一次派发的时间 用于推测执行
@@ -253,7 +295,14 @@ namespace {
         // 最快完成的任务耗时 作为推测阈值参考
         bool fastestSet_ = false;
         std::chrono::steady_clock::duration fastest_{};
+        /**
+         * master不支持同时接收多个job执行 master同一时刻只能有一个job
+         * 正在跑或待收尾的job
+         */
         std::unique_ptr<JobState> job_;
+        // 某次提交已受理 还在等client传map阶段需要的输入或者job插件
+        std::optional<Pending> pending_;
+        // 表示master运行状态
         std::atomic<bool> stopping_{false};
         std::string error_;
         std::function<void()> onShutdown_;
@@ -264,17 +313,20 @@ namespace {
             return;
         }
         const auto now = std::chrono::steady_clock::now();
-        // worker存活/任务超时始终维护 和有没有job无关
         const auto expired = registry_.poll(now);
+        // 没有按时发送心跳的worker
         for (const auto& workerId : expired.workers) {
+            // 这些worker被master判定挂了 要把worker已经完成的任务回收过来重新派发给其他worker
             recoverWorker(workerId);
         }
         for (const auto& task : expired.tasks) {
+            // 任务超时了 重新派发
             retryOrFail(task);
         }
         if (!job_) {
             return;
         }
+        // 当前master的job在跑
         dispatch();
         speculate();
         if (job_->scheduler.finished() || job_->scheduler.failed()) {
@@ -365,25 +417,29 @@ namespace {
     }
 
     void Coordinator::onFrame(ConnId id, const xmr::protocol::Frame& frame) {
+        // 看看是谁连接进来的
         const auto it = conns_.find(id);
         if (it == conns_.end()) {
             return;
         }
+        // worker或者client跟master控制端口之间的TCP连接
         Conn& conn = *it->second;
         try {
-            // 源文本里面第一个字段是命令名
             switch (frame.header.type) {
                 case xmr::protocol::MessageType::Submit: {
                     // client提交一个job
                     if (job_ || pending_) {
+                        // todo master不支持同时多个job在跑
                         xmr::protocol::SubmitAck ack;
                         ack.statusCode = xmr::protocol::StatusCode::Unavailable;
                         ack.reason = "a job is already running";
                         send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
                         break;
                     }
+                    // client给master提交的job
                     const auto submit = xmr::protocol::Submit::decode(frame.body);
                     xmr::protocol::SubmitAck ack;
+                    // master的数据端口 让client传job插件和input过来
                     ack.dataHost = dataHost_;
                     ack.dataPort = dataPort_;
                     if (submit.job.empty() || submit.output.empty() || submit.inputs.empty() || submit.reducers == 0) {
@@ -392,16 +448,18 @@ namespace {
                         send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
                         break;
                     }
-                    // 受理 等client在数据面把输入(+插件)传完再开跑
+                    // 标识master已经开始受理client的job了 现在开始等client把master需要的job插件和input传进来
                     pending_ = Pending{id, submit, frame.header.requestId};
+                    // 将来接收client从数据端口传input
                     inputUpload_.assign(submit.inputs.size(), std::string());
+                    // 总共M个数据 client会从数据端口传过来 每传过来一个就统计起来 保证map阶段依赖的数据是全的
                     inputDone_ = 0;
                     ack.statusCode = xmr::protocol::StatusCode::Ok;
                     send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
                     break;
                 }
                 case xmr::protocol::MessageType::Plugin: {
-                    // client在数据面把插件字节传上来
+                    // client在数据端口把插件字节传上来
                     const auto chunk = xmr::protocol::Plugin::decode(frame.body);
                     if (chunk.offset != conn.uploadBuffer.size()) {
                         fail("bad plugin upload");
@@ -429,7 +487,7 @@ namespace {
                     break;
                 }
                 case xmr::protocol::MessageType::InputBlob: {
-                    // client在数据面把map输入传上来
+                    // client在数据端口把map任务需要的输入input传上来
                     if (!pending_) {
                         break;
                     }
@@ -455,7 +513,7 @@ namespace {
                     if (!job_) {
                         break;
                     }
-                    // worker从数据面拉map输入
+                    // worker从数据端口拉map输入
                     const auto request = xmr::protocol::PullInput::decode(frame.body);
                     if (request.taskId >= job_->inputData.size()) {
                         throw std::runtime_error("INPUT out of range");
@@ -464,7 +522,7 @@ namespace {
                     break;
                 }
                 case xmr::protocol::MessageType::PullPlugin: {
-                    // worker从数据面拉插件
+                    // worker从数据端口拉插件
                     const auto request = xmr::protocol::PullPlugin::decode(frame.body);
                     const auto it = pluginStore_.find(request.hash);
                     if (it != pluginStore_.end()) {
@@ -499,7 +557,7 @@ namespace {
                     registry_.add(conn.workerId, std::chrono::steady_clock::now());
                     byWorker_[conn.workerId] = id;
                     {
-                        // 告诉worker master数据面端口 供它拉输入/插件
+                        // 告诉worker master数据端口 供它拉输入/插件
                         xmr::protocol::MasterData data;
                         data.port = dataPort_;
                         send(id, xmr::protocol::MessageType::MasterData, 0, data.encode());
@@ -510,13 +568,13 @@ namespace {
                     break;
                 }
                 case xmr::protocol::MessageType::DataAddress: {
-                    // worker上报自己的数据面监听端口 供其它worker拉中间结果
+                    // worker上报自己的数据监听端口 供其它worker拉中间结果
                     const auto address = xmr::protocol::DataAddress::decode(frame.body);
                     workerData_[conn.workerId] = {conn.host, static_cast<std::uint16_t>(address.port)};
                     break;
                 }
                 case xmr::protocol::MessageType::RequestTask: {
-                    // worker告诉master它空闲了 没job也先记着 有job时好直接派
+                    // worker告诉master它空闲了 希望master给它派任务
                     registry_.markIdle(conn.workerId);
                     conn.lastRequest = frame.header.requestId;
                     break;
@@ -636,6 +694,7 @@ namespace {
         }
         return locations;
     }
+    
     void Coordinator::sendTask(const std::string& workerId, const xmr::Task& task) {
         const auto byName = byWorker_.find(workerId);
         if (byName == byWorker_.end()) {
@@ -645,9 +704,10 @@ namespace {
         if (it == conns_.end()) {
             return;
         }
-        // master向worker派发任务
+        // master向worker派发任务 用控制端口的TCP发个消息
         auto message = xmr::toTaskMessage(task);
         if (task.kind == xmr::TaskKind::Reduce) {
+            // map中间结果按照R分区了 所以如果派发的是reduce任务 还得告诉它去哪些worker上的什么地方接数据 也就是woker的数据端口
             message.locations = fetchPlan();
         }
         send(byName->second, xmr::protocol::MessageType::Task, it->second->lastRequest, message.encode());
@@ -661,19 +721,23 @@ namespace {
         if (!pluginHash_.empty() && pluginReady_ < byWorker_.size()) {
             return;
         }
+        // 找到在等任务的worker
         while (registry_.hasIdle()) {
+            // 创建个任务
             auto task = job_->scheduler.takeTask();
             if (!task) {
                 break;
             }
             const auto now = std::chrono::steady_clock::now();
+            // 任务执行倒计时 worker得在限定时间内执行完
             const auto workerId = registry_.assignNext(*task, now);
             if (!workerId) {
                 break;
             }
-            // 记录第一次派发时间 用于推测执行
+            // 记录第一次派发时间 用于推测长尾任务
             auto& starts = task->kind == xmr::TaskKind::Map ? mapStarted_ : reduceStarted_;
             starts.emplace(task->id, now);
+            // 给worker派发任务
             sendTask(*workerId, *task);
         }
     }
@@ -725,14 +789,21 @@ namespace {
         }
     }
 
-    void Coordinator::send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId,
-                           const std::vector<std::uint8_t>& body, std::uint16_t flags) {
+    /// @brief master用控制端口给TCP回复消息 可能是传给了client 也可能是传给了worker
+    /// @param id 控制端口的TCP
+    /// @param type 消息类型
+    /// @param requestId 回复的是哪个请求
+    /// @param body 消息内容
+    /// @param flags 
+    void Coordinator::send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId, const std::vector<std::uint8_t>& body, std::uint16_t flags) {
+        // 找到控制端口的TCP
         const auto it = conns_.find(id);
         if (it == conns_.end()) {
             return;
         }
         const std::shared_ptr<Conn> conn = it->second;
         const auto bytes = xmr::protocol::makeFrame(type, requestId, body, flags);
+        // 丢到线程循环器 发送到TCP对端
         conn->loop->queueInLoop([conn, bytes] {
             conn->out.append(bytes);
             flushConn(*conn);
@@ -770,13 +841,15 @@ namespace {
     }
 
     void Coordinator::recoverWorker(const std::string& workerId) {
+        // woker没有心跳 被master判定下线了 回收派发给它的任务
         requeueTask(workerId);
         if (!job_) {
             return;
         }
-        // 该worker上已完成的map输出随它一起没了 需要重跑
+        // 该worker上已完成的任务需要回收 master再派发给其他worker
         for (auto it = mapOwner_.begin(); it != mapOwner_.end();) {
             if (it->second == workerId) {
+                // 回收任务
                 job_->scheduler.invalidate(xmr::TaskKind::Map, it->first);
                 it = mapOwner_.erase(it);
             } else {
@@ -813,15 +886,18 @@ namespace {
         conn.loop->modify(conn.connection.fd(), events);
     }
 
+    /// @brief master用TCP连接给对端发消息
+    /// @param conn TCP连接
     void flushConn(Conn& conn) {
         if (conn.broken) {
             return;
         }
         while (!conn.out.empty()) {
+            // 每次TCP发出去了多少数据
             std::size_t sent = 0;
-            const xmr::net::IoStatus status = xmr::net::sendFrom(
-                conn.connection.fd(), conn.out.data(), conn.out.size(), sent);
+            const xmr::net::IoStatus status = xmr::net::sendFrom(conn.connection.fd(), conn.out.data(), conn.out.size(), sent);
             if (status == xmr::net::IoStatus::Ok) {
+                // 把发出去的数据从缓冲区摘掉
                 conn.out.consume(sent);
             } else if (status == xmr::net::IoStatus::WouldBlock) {
                 break;
@@ -836,19 +912,24 @@ namespace {
         updateInterest(conn);
     }
 
-    // 注册连接上的读写处理 由这个连接归属的worker reactor调用
+    /// @brief 连接到master的TCP 可能连的是控制端口 也可能连的是数据端 不管是哪个端口的TCP连接 它的读写都放在就一起处理 可能通过消息类型区分出来
+    /// @param conn 里面能拿到TCP连接
     void serveConn(std::shared_ptr<Conn> conn) {
+        // 读写任务交给读写线程
         conn->loop->add(conn->connection.fd(), xmr::net::kReadable,
             [conn](std::uint32_t events) {
+                // 不管是控制端口还是数据端口 只要有人向master发送消息 master这边就判断TCP收到数据了
                 if (conn->broken) {
                     return;
                 }
+                // redis中有这种读写顺序防护
                 if (events & xmr::net::kWritable) {
                     flushConn(*conn);
                 }
                 if (events & (xmr::net::kReadable | xmr::net::kBroken)) {
                     bool closed = false;
                     while (true) {
+                        // 把TCP传过来的数据读到缓冲区
                         const xmr::net::IoStatus status = xmr::net::recvInto(conn->connection.fd(), conn->in);
                         if (status == xmr::net::IoStatus::Ok) {
                             continue;
@@ -859,6 +940,7 @@ namespace {
                         closed = true;
                         break;
                     }
+                    // 网络传过来的大端序解码
                     xmr::protocol::FrameDecoder decoder(conn->in);
                     while (auto frame = decoder.next()) {
                         conn->coordinatorLoop->queueInLoop([conn, frame = *frame]() mutable {
@@ -878,8 +960,8 @@ namespace {
 
 int main(int argc, char** argv) {
     // master控制面端口
-    std::string listen = "127.0.0.1:9527";
-    // master数据面端口 不填则控制面host + 默认9331
+    std::string listen;
+    // master数据面端口
     std::string dataListen;
 
     for (int i = 1; i < argc; ++i) {
@@ -892,16 +974,21 @@ int main(int argc, char** argv) {
     }
 
     try {
-        const auto [host,port] = parseEndpoint(listen);
+        if (listen.empty()) {
+            throw UsageError("missing --listen");
+        }
+        // 控制端口
+        const auto [host,port] = parseListen(listen, "127.0.0.1");
+        // 监听在控制端口上
         xmr::net::Listener listener(host, port);
         xmr::net::setNonBlocking(listener.fd());
         std::cout << "LISTENING " << host << ":" << listener.port() << std::endl;
 
-        // 数据面 listener: worker拉输入/插件 client上传插件
+        // 数据面端口 worker拉map的input/插件 client上传插件
         std::string dataHost = host;
         std::uint16_t dataPort = kDefaultDataPort;
         if (!dataListen.empty()) {
-            const auto [dh, dp] = parseEndpoint(dataListen);
+            const auto [dh, dp] = parseListen(dataListen, host);
             dataHost = dh;
             dataPort = dp;
         }
@@ -910,9 +997,13 @@ int main(int argc, char** argv) {
         std::cout << "DATA_LISTENING " << dataHost << ":" << dataListener.port() << std::endl;
 
         Coordinator coordinator;
-        xmr::net::EventLoopGroup ioGroup(kIoThreads);
+        // 独占的线程 只负责跑master自己
         xmr::net::EventLoop coordinatorLoop;
+        // 负责master接收新来的TCP连接 可能是连接的控制端口 也可能是连接的数据端口
         xmr::net::EventLoop bossLoop;
+        // master真正干活的线程
+        xmr::net::EventLoopGroup ioGroup(kIoThreads);
+        // master给worker连接进来的TCP编号
         std::atomic<ConnId> nextConnId{1};
 
         std::promise<void> donePromise;
@@ -925,11 +1016,14 @@ int main(int argc, char** argv) {
         ioGroup.start();
         std::thread bossThread([&] { bossLoop.run(); });
 
+        // master启动起来
         coordinatorLoop.runInLoop([&] { coordinator.start(); });
 
+        // 处理连接请求 可能是有人连master的控制端口 可能是有人连master的数据端口
         auto acceptFrom = [&](xmr::net::Listener& acceptor) {
             try {
                 while (true) {
+                    // 从服务端全连接队列拿TCP连接
                     xmr::net::Connection connection;
                     const xmr::net::IoStatus status = acceptor.acceptNonBlocking(connection);
                     if (status == xmr::net::IoStatus::WouldBlock) {
@@ -940,11 +1034,14 @@ int main(int argc, char** argv) {
                     }
                     xmr::net::setNonBlocking(connection.fd());
                     auto conn = std::make_shared<Conn>();
+                    // tcp连接
                     conn->connection = std::move(connection);
+                    // worker的ip
                     conn->host = peerHost(conn->connection.fd());
                     conn->id = nextConnId.fetch_add(1);
                     conn->owner = &coordinator;
                     conn->coordinatorLoop = &coordinatorLoop;
+                    // 真正干活的线程负责TCP读写
                     conn->loop = ioGroup.next();
                     xmr::net::EventLoop* workerLoop = conn->loop;
                     coordinatorLoop.runInLoop([&coordinator, conn, workerLoop] {
@@ -956,7 +1053,9 @@ int main(int argc, char** argv) {
             }
         };
         bossLoop.runInLoop([&] {
+            // 控制端口的连接请求处理
             bossLoop.add(listener.fd(), xmr::net::kReadable, [&](std::uint32_t) { acceptFrom(listener); });
+            // 数据端口的连接请求处理
             bossLoop.add(dataListener.fd(), xmr::net::kReadable, [&](std::uint32_t) { acceptFrom(dataListener); });
         });
 
@@ -977,8 +1076,7 @@ int main(int argc, char** argv) {
 
         for (auto& [id, conn] : coordinator.conns()) {
             try {
-                const auto frame = xmr::protocol::makeFrame(xmr::protocol::MessageType::Shutdown, 0,
-                                                            xmr::protocol::Shutdown{}.encode());
+                const auto frame = xmr::protocol::makeFrame(xmr::protocol::MessageType::Shutdown, 0, xmr::protocol::Shutdown{}.encode());
                 conn->out.append(frame);
                 xmr::net::setBlocking(conn->connection.fd());
                 while (!conn->out.empty()) {
@@ -998,6 +1096,10 @@ int main(int argc, char** argv) {
         if (coordinator.hasError()) {
             throw std::runtime_error(coordinator.error());
         }
+    } catch (const UsageError& error) {
+        std::cerr << "master: " << error.what() << '\n';
+        usage(argv[0]);
+        return static_cast<int>(ExitCode::Usage);
     } catch (const std::exception& error) {
         std::cerr << "master: " << error.what() << '\n';
         return static_cast<int>(ExitCode::Failure);

@@ -14,10 +14,14 @@ namespace xmr::net {
         Closed,
     };
 
+    /// @brief 设置socket非阻塞
+    /// @param fd 哪个socket
     void setNonBlocking(int fd);
 
     void setBlocking(int fd);
 
+    /// @param fd 代表TCP连接的本端socket
+    /// @param buffer 把TCP传过来的数据收到buffer里面
     IoStatus recvInto(int fd, ByteBuffer& buffer);
 
     IoStatus sendFrom(int fd, const void* data, std::size_t size, std::size_t& sent);
@@ -29,12 +33,7 @@ namespace xmr::net {
      */
     void sendAll(int fd, const void* data, std::size_t size);
 
-    /**
-     * TCP连接
-     * 只感知纯文本协议
-     * 协议格式是 字段\t数据
-     * 第1个字段是命令名
-     */
+    // TCP连接
     class Connection {
     public:
         Connection() = default;
@@ -56,18 +55,26 @@ namespace xmr::net {
         }
 
     private:
+        /**
+         * 代表TCP连接的那个socket 这个fd是本端的那个socket
+         * TCP连接的是双端
+         * 在服务端 这个fd就是服务端的socket 它的对端就是客户端
+         * 在客户端 这个fd就是客户端的socket 它的对端就是服务端
+         */
         int fd_{-1};
     };
 
+    // 服务端
     class Listener {
     public:
+        // 监听端口
         Listener(const std::string& host, std::uint16_t port);
 
         ~Listener();
 
-        Listener(Listener&& other) noexcept;
+        Listener(Listener&& other);
 
-        Listener& operator=(Listener&& other) noexcept;
+        Listener& operator=(Listener&& other);
 
         Listener(const Listener&) = delete;
 
@@ -81,14 +88,16 @@ namespace xmr::net {
             return fd_;
         }
 
-        // Block until a client connects and return the connected socket.
+        // 从listen系统调用指定的backlog全连接队列掏一个对端连接出来
         Connection accept() const;
 
+        // 全连接队列空时 不要阻塞在那儿
         IoStatus acceptNonBlocking(Connection& out) const;
 
     private:
-        // master监听的socket
+        // 监听的socket
         int fd_{-1};
+        // 监听在哪个端口上
         std::uint16_t port_{0};
     };
 

@@ -22,7 +22,7 @@ Run from `build/bin`: the binaries and the copied `asset/` inputs all resolve fr
 ```sh
 cd ./build/bin
 
-./x-master --listen 127.0.0.1:9527 --data-listen 127.0.0.1:9331
+./x-master --listen 9527 --data-listen 9331
 ```
 
 > the master is a persistent server: it only listens and waits for a job to be
@@ -30,8 +30,9 @@ cd ./build/bin
 > and `DATA_LISTENING <host:port>` (data plane) once ready.
 >
 > all bulk traffic (map input, plugin, shuffle) goes over the data plane; the
-> control plane only carries small messages. `--data-listen <host:port>` pins the
-> data port (default: control host with port 9331).
+> control plane only carries small messages. `--listen <port>` is required and
+> binds `127.0.0.1`; `--data-listen <port>` pins the data port (default: control
+> host with port 9331). `host:port` is also accepted for both.
 
 ### 1.1.2 start workers
 

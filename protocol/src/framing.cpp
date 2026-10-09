@@ -11,6 +11,7 @@ namespace xmr::protocol {
         if (buffer_.size() < kHeaderSize) {
             return std::nullopt;
         }
+        // 协议头
         const Header header = decodeHeader(buffer_.data(), buffer_.size());
         const std::size_t total = kHeaderSize + static_cast<std::size_t>(header.payloadLen);
         if (buffer_.size() < total) {

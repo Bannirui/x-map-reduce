@@ -12,13 +12,17 @@ namespace xmr::net {
 } // namespace xmr::net
 
 namespace xmr::protocol {
+    // 网络传输的消息
     struct Frame {
+        // 消息头
         Header header;
+        // 消息
         std::vector<std::uint8_t> body;
     };
 
     class FrameDecoder {
     public:
+        /// @param buffer 用TCP传过来的数据
         explicit FrameDecoder(net::ByteBuffer& buffer) : buffer_(buffer) {
         }
 
@@ -27,6 +31,7 @@ namespace xmr::protocol {
         std::size_t buffered() const noexcept;
 
     private:
+        // 用TCP传输过来的数据 它接的是TCP流式数据 会源源不断进来数据 拆包
         net::ByteBuffer& buffer_;
     };
 } // namespace xmr::protocol

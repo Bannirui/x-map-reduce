@@ -19,8 +19,9 @@ namespace xmr::net {
             return std::runtime_error(what + ": " + std::strerror(errno));
         }
 
-        // RAII for a raw fd used only during setup, before it is handed to a Connection.
+        // fd资源用对象生命周期管理
         struct ScopedFd {
+            // -1是哨兵值 资源被转移后要置成-1
             int fd = -1;
 
             ScopedFd() = default;
@@ -38,6 +39,22 @@ namespace xmr::net {
 
             ScopedFd& operator=(const ScopedFd&) = delete;
 
+            ScopedFd(ScopedFd&& other) noexcept : fd(other.fd) {
+                other.fd = -1;
+            }
+
+            ScopedFd& operator=(ScopedFd&& other) noexcept {
+                if (this != &other) {
+                    if (fd >= 0) {
+                        ::close(fd);
+                    }
+                    fd = other.fd;
+                    other.fd = -1;
+                }
+                return *this;
+            }
+
+            // 转移资源
             int release() {
                 const int value = fd;
                 fd = -1;
@@ -56,8 +73,13 @@ namespace xmr::net {
             }
         };
 
-        // Resolve host:port into a connect/bind result list. `passive` selects the
-        // bind (server) flavour; `host` empty means "any local address".
+        /**
+         * @param host 为空就是监听所有网卡
+         * @param port socket的端口
+         * @param passive 控制socket的模式 给客户端用还是服务端用
+         *                true-被动socket 给服务端用
+         *                false-主动socket 给客户端用
+         */
         AddrInfo resolve(const std::string& host, std::uint16_t port, bool passive) {
             addrinfo hints{};
             hints.ai_family = AF_UNSPEC;
@@ -74,6 +96,9 @@ namespace xmr::net {
             return AddrInfo{results};
         }
 
+        /// @brief 可能创建socket的时候没有指定端口 那么系统会随机指派 现在返回过来拿着socket去确认它是哪个端口
+        /// @param fd 哪个socket
+        /// @return socket的真实端口
         std::uint16_t boundPort(int fd) {
             sockaddr_storage address{};
             socklen_t length = sizeof(address);
@@ -113,6 +138,7 @@ namespace xmr::net {
     IoStatus recvInto(int fd, ByteBuffer& buffer) {
         std::uint8_t chunk[65536];
         while (true) {
+            // 把TCP传过来的数据收进来放到buffer里面
             const ssize_t received = ::recv(fd, chunk, sizeof(chunk), 0);
             if (received > 0) {
                 buffer.append(chunk, static_cast<std::size_t>(received));
@@ -134,8 +160,13 @@ namespace xmr::net {
         }
     }
 
+    /// @param fd 代表了TCP 它是本端的socket 用TCP跟对端socket连接了
+    /// @param data 要发送的数据 缓冲区
+    /// @param size 有多少数据要发送出去的
+    /// @param sent 实际发送出去了多少
     IoStatus sendFrom(int fd, const void* data, std::size_t size, std::size_t& sent) {
         while (true) {
+            // 用TCP给对端发数据
             const ssize_t written = ::send(fd, data, size, MSG_NOSIGNAL);
             if (written > 0) {
                 sent = static_cast<std::size_t>(written);
@@ -202,20 +233,22 @@ namespace xmr::net {
     }
 
     Listener::Listener(const std::string& host, std::uint16_t port) {
-        AddrInfo results = resolve(host, port,/*passive=*/true);
+        // 要创建被动socket给服务端用
+        AddrInfo results = resolve(host, port, true);
         for (addrinfo* entry = results.info; entry != nullptr; entry = entry->ai_next) {
             ScopedFd candidate(::socket(entry->ai_family, entry->ai_socktype, entry->ai_protocol));
             if (candidate.fd < 0) {
                 continue;
             }
             int reuse = 1;
-            ::setsockopt(candidate.fd,SOL_SOCKET,SO_REUSEADDR, &reuse, sizeof(reuse));
+            ::setsockopt(candidate.fd, SOL_SOCKET,SO_REUSEADDR, &reuse, sizeof(reuse));
             if (::bind(candidate.fd, entry->ai_addr, entry->ai_addrlen) != 0) {
                 continue;
             }
-            if (::listen(candidate.fd,SOMAXCONN) != 0) {
+            if (::listen(candidate.fd, SOMAXCONN) != 0) {
                 continue;
             }
+            // 防止创建socket的时候没有指定端口 用的是系统随机分配的 拿到真正监听在哪个端口上
             port_ = boundPort(candidate.fd);
             fd_ = candidate.release();
             return;
@@ -224,23 +257,26 @@ namespace xmr::net {
     }
 
     Listener::~Listener() {
+        // 关闭socket
         if (fd_ >= 0) {
             ::close(fd_);
         }
     }
 
-    Listener::Listener(Listener&& other) noexcept : fd_(other.fd_), port_(other.port_) {
+    Listener::Listener(Listener&& other): fd_(other.fd_), port_(other.port_) {
+        // 释放右值资源
         other.fd_ = -1;
         other.port_ = 0;
     }
 
-    Listener& Listener::operator=(Listener&& other) noexcept {
+    Listener& Listener::operator=(Listener&& other) {
         if (this != &other) {
             if (fd_ >= 0) {
                 ::close(fd_);
             }
             fd_ = other.fd_;
             port_ = other.port_;
+            // 释放右值资源
             other.fd_ = -1;
             other.port_ = 0;
         }
@@ -249,8 +285,10 @@ namespace xmr::net {
 
     Connection Listener::accept() const {
         while (true) {
+            // 从服务端的全连接队列拿出来的这个socket此时已经是TCP的一端了 它的另一端就是客户端的socket 它已经代表了TCP
             const int client = ::accept(fd_, nullptr, nullptr);
             if (client >= 0) {
+                // TCP封装起来
                 return Connection(client);
             }
             if (errno != EINTR) {
@@ -269,6 +307,7 @@ namespace xmr::net {
             if (errno == EINTR) {
                 continue;
             }
+            // 全连接队列为空时会返回EAGAIN
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 return IoStatus::WouldBlock;
             }

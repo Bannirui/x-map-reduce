@@ -116,20 +116,29 @@ namespace xmr {
     }
 
     bool Scheduler::invalidate(TaskKind kind, std::size_t id) {
+        // master曾经派发出去的任务
         Entry& entry = entryOf(kind, id);
         if (!entry.done) {
             return false;
         }
-        // 已完成的任务作废 退回待派发 重新执行(比如它的输出所在worker死了)
+        // worker心跳丢了 master判定worker挂了 曾经派发给它的任务都要作废准备重新派发
         entry.done = false;
         entry.inFlight.clear();
+        /**
+         * master发现worker挂了和worker真正挂了 中间可能隔着一段时间的 也就是说master可能发现得不及时 稳妥的做法是阶段回退
+         * 现在是reduce阶段就回退到map阶段
+         * 现在是job完结阶段就回退到reduce阶段
+         * 情愿把时间多往回退一点 无非就是woker可能多执行点任务 保证幂等就可以
+         */
         if (kind == TaskKind::Map) {
+            // 回收的是map任务
             --mapDone_;
             mapPending_.push_back(id);
             if (phase_ == Phase::Reduce) {
                 phase_ = Phase::Map;
             }
         } else {
+            // 回收的是reduce任务
             --reduceDone_;
             reducePending_.push_back(id);
             if (phase_ == Phase::Done) {

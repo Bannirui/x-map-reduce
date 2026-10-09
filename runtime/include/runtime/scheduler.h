@@ -29,7 +29,7 @@ namespace xmr {
         Scheduler(std::string job, std::vector<std::string> inputs, std::size_t reducers, std::uint32_t maxAttempts = 4);
 
         /**
-         * 开放给master用 拿个任务派发给空闲worker
+         * 开放给master用 创建个任务派发给空闲worker
          * @return master拿到的任务 可能是空的
          *               什么时候是空的
          *               1 当前阶段都派发出去了 比如map阶段map任务都派发出去了 reduce阶段reduce任务都派发出去了
@@ -57,6 +57,9 @@ namespace xmr {
          */
         bool markDone(TaskKind kind, std::size_t id, std::uint32_t attempt);
 
+        /// @brief worker挂了 把它名下已经完成的任务回收准备重新派发给别的worker
+        /// @param kind 要回收的任务是map任务还是reduce任务
+        /// @param id 任务id
         bool invalidate(TaskKind kind, std::size_t id);
 
         void markFailed(TaskKind kind, std::size_t id, std::string reason);

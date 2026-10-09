@@ -152,8 +152,7 @@ namespace xmr::protocol {
         return frame;
     }
 
-    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId,
-                                        const std::vector<std::uint8_t>& body, std::uint16_t flags) {
+    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId, const std::vector<std::uint8_t>& body, std::uint16_t flags) {
         Header header;
         header.type = type;
         header.flags = flags;

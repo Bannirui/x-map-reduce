@@ -68,6 +68,7 @@ namespace xmr {
 
         /**
          * master找到空闲的worker给它派个任务
+         * 安装个定时保证在限定时间内worker能完成它
          * @param task 什么任务
          * @param now 给任务看门狗用的 在任务执行超时时间阈值内master没收到worker上报的完成消息 master就要重新派发这个任务了
          */
@@ -80,15 +81,14 @@ namespace xmr {
          */
         bool complete(const std::string& id);
 
-        /**
-         * @param now 看看now这个时间有没有看门狗任务到期了
-         * @return 被master判定下线的worker 以及超时需要重发的任务
-         */
         struct Expired {
+            // 被master判定下线的worker worker没有按时发送心跳给master导致的
             std::vector<std::string> workers;
+            // 超时需要重发的任务
             std::vector<Task> tasks;
         };
 
+        /// @param now master给每个worker维护了一个心跳窗口阈值 看看有没有worker没有按时发送心跳的
         Expired poll(TimePoint now);
 
         /**

@@ -9,6 +9,7 @@
 #include<vector>
 
 namespace xmr::net {
+    // 仿的Netty
     class EventLoopGroup {
     public:
         explicit EventLoopGroup(std::size_t loops);
@@ -23,6 +24,7 @@ namespace xmr::net {
 
         void stop();
 
+        /// @brief 从线程池取个线程用
         EventLoop* next();
 
         std::size_t size() const {
@@ -30,8 +32,10 @@ namespace xmr::net {
         }
 
     private:
+        // 线程池的线程
         std::vector<std::unique_ptr<EventLoop> > loops_;
         std::vector<std::thread> threads_;
+        // 线程选择器
         std::atomic<std::size_t> next_{0};
     };
 } // namespace xmr::net

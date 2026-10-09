@@ -97,3 +97,5 @@ TODO
     - [ ] master可以主动观测
     - [ ] master对worker任务派发策略
 - [X] 支持worker的动态扩容
+- [ ] Netty的codex拆包用的是状态机
+- [ ] master支持client同时提交多个job 同时执行

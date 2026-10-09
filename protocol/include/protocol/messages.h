@@ -53,7 +53,7 @@ namespace xmr::protocol {
         std::uint64_t reducers = 1;
         std::uint64_t maps = 0;
         std::optional<std::string> input;
-        // reduce任务要去哪些worker拉中间结果 每个是"mapTask,host,port"
+        // map中间结果按照R分区了 所以如果派发的是reduce任务 还得告诉它去哪些worker上的什么地方接数据 也就是woker的数据端口 mapTask,host,port
         std::vector<std::string> locations;
 
         std::vector<std::uint8_t> encode() const;
@@ -160,10 +160,15 @@ namespace xmr::protocol {
         static Shutdown decode(const std::vector<std::uint8_t>& body);
     };
 
+    // client向master提交的job
     struct Submit {
+        // job名 唯一索引 要找job插件用的
         std::string job;
+        // 确定好R map阶段分区要用
         std::uint64_t reducers = 1;
+        // 最终job的输出路径
         std::string output;
+        // map阶段的key 也就是文件名 决定了M
         std::vector<std::string> inputs;
         // 插件的内容哈希 为空表示worker本地已预加载
         std::string pluginHash;
@@ -173,10 +178,11 @@ namespace xmr::protocol {
         static Submit decode(const std::vector<std::uint8_t>& body);
     };
 
+    // client向master提交job后 后面master需要让client把job的插件二进制和map阶段的input走数据端口传进来
     struct SubmitAck {
         StatusCode statusCode = StatusCode::Ok;
         std::string reason;
-        // master的数据面地址 供client上传插件
+        // master的数据端口 供client上传插件和input数据
         std::string dataHost;
         std::uint64_t dataPort = 0;
 

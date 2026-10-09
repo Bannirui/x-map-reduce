@@ -20,11 +20,13 @@ namespace xmr::protocol {
     // 发送大blob时每块的大小 配合flags.More+offset做流式分块
     inline constexpr std::uint32_t kChunkBytes = 1u << 20;
 
-    // 消息类型
+    // 消息类型 包含了控制端口和数据端口的所有消息
     enum class MessageType : std::uint8_t {
         Hello = 1,
         HelloAck = 2,
+        // 控制端口 worker告诉master自己等待任务
         RequestTask = 3,
+        // master向worker派发任务
         Task = 4,
         InputRequest = 5,
         Data = 6,
@@ -37,14 +39,18 @@ namespace xmr::protocol {
         Pong = 13,
         Stop = 14,
         Shutdown = 15,
+        // client向master提交任务
         Submit = 16,
         SubmitAck = 17,
         SubmitResult = 18,
         Pull = 19,
         DataAddress = 20,
         Plugin = 21,
+        // worker加载插件的结果
         PluginAck = 22,
+        // 数据端口 worker跟master要map阶段的input
         PullInput = 23,
+        // 数据端口 worker跟master要插件
         PullPlugin = 24,
         MasterData = 25,
         NeedPlugin = 26,
@@ -127,7 +133,7 @@ namespace xmr::protocol {
     std::array<std::uint8_t, kHeaderSize> encodeHeader(const Header& header);
 
     /**
-     * @param data 把网络上传来的数据解码成header
+     * @param data 把网络上传来的数据解码成header 解码后原始数据不破坏
      * @param size data多大
      */
     Header decodeHeader(const std::uint8_t* data, std::size_t size);
@@ -139,8 +145,13 @@ namespace xmr::protocol {
      */
     std::vector<std::uint8_t> encodeFrame(const Header& header, const std::vector<std::uint8_t>& payload);
 
-    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId,
-                                        const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
+    /// @brief 消息编码
+    /// @param type 消息类型 
+    /// @param requestId 请求/响应的关联 
+    /// @param body 消息内容
+    /// @param flags 放在协议头里面
+    /// @return 
+    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId, const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
 
     void appendVarint(std::vector<std::uint8_t>& out, std::uint64_t value);
 

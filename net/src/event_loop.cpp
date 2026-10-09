@@ -32,6 +32,7 @@ namespace xmr::net {
         epoll_event event{};
         event.events = events;
         event.data.fd = fd;
+        // 向底层selector注册对fd的读写事件监听
         if (::epoll_ctl(epollFd_, EPOLL_CTL_ADD, fd, &event) != 0) {
             throw systemError("epoll_ctl(ADD) failed");
         }
@@ -110,8 +111,10 @@ namespace xmr::net {
 
     void EventLoop::runInLoop(std::function<void()> task) {
         if (isInLoopThread()) {
+            // 事件循环器自己给自己提交的任务 立马执行
             task();
         } else {
+            // 外面给事件循环器提交的任务 先缓存起来 适合的时候再执行
             queueInLoop(std::move(task));
         }
     }
@@ -125,8 +128,10 @@ namespace xmr::net {
     }
 
     void EventLoop::add(int fd, std::uint32_t events, Handler handler) {
+        // 给事件循环器提交个任务 任务本身干的又是向底层selector注册IO事件监听
         runInLoop([this, fd, events, handler = std::move(handler)]() mutable {
             handlers_[fd] = std::move(handler);
+            // 让selctor监听fd这个socket的可读还是可写
             poller_.add(fd, events);
         });
     }

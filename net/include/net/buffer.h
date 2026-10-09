@@ -5,6 +5,7 @@
 #include<vector>
 
 namespace xmr::net {
+    // 模仿Netty
     class ByteBuffer {
     public:
         void append(const void* data, std::size_t size);

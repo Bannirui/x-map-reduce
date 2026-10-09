@@ -28,6 +28,7 @@ namespace xmr::net {
         append(data.data(), data.size());
     }
 
+    /// @param size 已经发出去这么多数据了 更新缓冲区 从缓冲区摘掉这么多的数据
     void ByteBuffer::consume(std::size_t size) {
         if (size > this->size()) {
             throw std::out_of_range("ByteBuffer::consume past end");
