@@ -67,6 +67,7 @@ TODO
   - [X] V7.0 stateless coordinator: move shuffle data off the master (direct worker-to-worker fetch)
   - [ ] V7.1 persistent cluster master that accepts jobs; the per-job coordinator becomes a restartable driver
   - [ ] V7.2 leader election via an external consensus store (ZooKeeper/etcd/Consul)
+  - [ ] Master在单点情况甚至即使是集群下，怎么做checkpoint来保证任务不丢失
 - [X] V8 epoll+reactor
   - [X] V8.1 [protocl enhanceman](./protocol/PROTOCOL.md)
   - [X] V8.2 message and encoder/decoder
