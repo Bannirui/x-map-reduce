@@ -3,11 +3,11 @@
 #include"net/buffer.h"
 
 namespace xmr::protocol {
-    std::size_t FrameDecoder::buffered() const noexcept {
+    std::size_t FrameParser::buffered() const noexcept {
         return buffer_.size();
     }
 
-    std::optional<Frame> FrameDecoder::next() {
+    std::optional<Frame> FrameParser::next() {
         if (buffer_.size() < kHeaderSize) {
             return std::nullopt;
         }

@@ -21,8 +21,9 @@ add_asset_copy_target("${CMAKE_SOURCE_DIR}/asset")
 
 include(CTest)
 
+include(${CMAKE_SOURCE_DIR}/cmake/xnet.cmake)
+
 add_subdirectory(mapreduce)
-add_subdirectory(net)
 add_subdirectory(protocol)
 add_subdirectory(runtime)
 add_subdirectory(jobs)

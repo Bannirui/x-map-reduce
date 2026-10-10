@@ -12,7 +12,7 @@ refer to [TODO](./TODO.md)
 
 ```sh
 chmod +x ./build.sh
-./build.sh && ctest --test-dir build --output-on-failure
+./build.sh
 ```
 
 Run from `build/bin`: the binaries and the copied `asset/` inputs all resolve from there.

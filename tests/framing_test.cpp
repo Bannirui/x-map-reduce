@@ -60,7 +60,6 @@ std::vector<std::uint8_t> rawHeader(const std::uint8_t magic[4], std::uint32_t p
 }  // namespace
 
 int main() {
-    using namespace xmr::net;
     using namespace xmr::protocol;
 
     try {
@@ -102,7 +101,7 @@ int main() {
 
         {
             ByteBuffer buffer;
-            FrameDecoder decoder(buffer);
+            FrameParser decoder(buffer);
 
             Hello hello;
             hello.workerId = "worker-1";
@@ -122,7 +121,7 @@ int main() {
 
         {
             ByteBuffer buffer;
-            FrameDecoder decoder(buffer);
+            FrameParser decoder(buffer);
 
             Hello hello;
             hello.workerId = "split";
@@ -144,7 +143,7 @@ int main() {
 
         {
             ByteBuffer buffer;
-            FrameDecoder decoder(buffer);
+            FrameParser decoder(buffer);
 
             Ping ping;
             ping.nonce = 1;
@@ -167,7 +166,7 @@ int main() {
             const std::uint8_t wrongMagic[4] = {'N', 'O', 'P', 'E'};
             ByteBuffer buffer;
             buffer.append(rawHeader(wrongMagic, 0));
-            FrameDecoder decoder(buffer);
+            FrameParser decoder(buffer);
             check(throwsProtocol([&] { decoder.next(); }), "bad magic should throw");
         }
 
@@ -175,7 +174,7 @@ int main() {
             const std::uint8_t magic[4] = {'X', 'M', 'R', 'P'};
             ByteBuffer buffer;
             buffer.append(rawHeader(magic, kMaxPayloadBytes + 1));
-            FrameDecoder decoder(buffer);
+            FrameParser decoder(buffer);
             check(throwsProtocol([&] { decoder.next(); }), "oversized frame should throw");
         }
 

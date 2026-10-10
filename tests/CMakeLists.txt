@@ -4,26 +4,6 @@ add_test(NAME mapreduce_test COMMAND mapreduce_test)
 
 find_package(Threads REQUIRED)
 
-add_executable(net_test net_test.cpp)
-target_link_libraries(net_test PRIVATE x-net Threads::Threads)
-add_test(NAME net_test COMMAND net_test)
-
-add_executable(timer_test timer_test.cpp)
-target_link_libraries(timer_test PRIVATE x-net)
-add_test(NAME timer_test COMMAND timer_test)
-
-add_executable(thread_pool_test thread_pool_test.cpp)
-target_link_libraries(thread_pool_test PRIVATE x-net Threads::Threads)
-add_test(NAME thread_pool_test COMMAND thread_pool_test)
-
-add_executable(notifier_test notifier_test.cpp)
-target_link_libraries(notifier_test PRIVATE x-net)
-add_test(NAME notifier_test COMMAND notifier_test)
-
-add_executable(event_loop_test event_loop_test.cpp)
-target_link_libraries(event_loop_test PRIVATE x-net Threads::Threads)
-add_test(NAME event_loop_test COMMAND event_loop_test)
-
 add_executable(worker_registry_test worker_registry_test.cpp)
 target_link_libraries(worker_registry_test PRIVATE x-runtime)
 add_test(NAME worker_registry_test COMMAND worker_registry_test)
@@ -43,6 +23,10 @@ add_test(NAME messages_test COMMAND messages_test)
 add_executable(framing_test framing_test.cpp)
 target_link_libraries(framing_test PRIVATE x-protocol)
 add_test(NAME framing_test COMMAND framing_test)
+
+add_executable(frame_codec_test frame_codec_test.cpp)
+target_link_libraries(frame_codec_test PRIVATE x-protocol Threads::Threads)
+add_test(NAME frame_codec_test COMMAND frame_codec_test)
 
 add_executable(control_plane_test control_plane_test.cpp)
 target_link_libraries(control_plane_test PRIVATE x-mapreduce)

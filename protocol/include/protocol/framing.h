@@ -6,10 +6,8 @@
 #include<optional>
 #include<vector>
 
-namespace xmr::net {
-    // 前向声明
-    class ByteBuffer;
-} // namespace xmr::net
+// 前向声明
+class ByteBuffer;
 
 namespace xmr::protocol {
     // 网络传输的消息
@@ -20,10 +18,10 @@ namespace xmr::protocol {
         std::vector<std::uint8_t> body;
     };
 
-    class FrameDecoder {
+    class FrameParser {
     public:
         /// @param buffer 用TCP传过来的数据
-        explicit FrameDecoder(net::ByteBuffer& buffer) : buffer_(buffer) {
+        explicit FrameParser(ByteBuffer& buffer) : buffer_(buffer) {
         }
 
         std::optional<Frame> next();
@@ -32,6 +30,6 @@ namespace xmr::protocol {
 
     private:
         // 用TCP传输过来的数据 它接的是TCP流式数据 会源源不断进来数据 拆包
-        net::ByteBuffer& buffer_;
+        ByteBuffer& buffer_;
     };
 } // namespace xmr::protocol

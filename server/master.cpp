@@ -1,6 +1,12 @@
+#include"net/bootstrap.h"
+#include"net/channel.h"
+#include"net/channel_handler.h"
+#include"net/channel_handler_context.h"
+#include"net/channel_pipeline.h"
 #include"net/event_loop.h"
 #include"net/event_loop_group.h"
 #include"net/net.h"
+#include"protocol/frame_codec.h"
 #include"protocol/framing.h"
 #include"protocol/messages.h"
 #include"runtime/exit_code.h"
@@ -55,23 +61,10 @@ namespace {
     using ConnId = std::uint64_t;
     using TimePoint = std::chrono::steady_clock::time_point;
 
-    struct Conn;
     class Coordinator;
 
-    // 对TCP再包一层
-    struct Conn {
-        // TCP连接
-        xmr::net::Connection connection;
-        // 缓冲区放TCP里面读到的数据
-        xmr::net::ByteBuffer in;
-        // 缓冲区放要往TCP写的数据
-        xmr::net::ByteBuffer out;
-        // 负责TCP读写的线程
-        xmr::net::EventLoop* loop = nullptr;
-        // 独占的线程 只负责跑master自己
-        xmr::net::EventLoop* coordinatorLoop = nullptr;
-        // master
-        Coordinator* owner = nullptr;
+    // 对连接再包一层
+    struct ConnState {
         // worker连接进来master的编号
         ConnId id = 0;
         // worker的ip master不负责数据 只管理元数据 将来shuffle的数据是worker跟worker传 所以master要保存worker的ip
@@ -83,13 +76,9 @@ namespace {
         std::unordered_set<std::string> plugins;
         // 数据连接上client上传插件的接收缓冲 coordinator线程独占
         std::vector<std::uint8_t> uploadBuffer;
-        // TCP异常了 可能是客户端强关了 这种断掉的TCP连接就不要处理了
-        bool broken = false;
+        // 这条连接对应的channel 发送时直接用
+        std::shared_ptr<Channel> channel;
     };
-
-    void updateInterest(Conn& conn);
-
-    void flushConn(Conn& conn);
 
     /**
      * @param endpoint host:port格式
@@ -163,7 +152,7 @@ namespace {
         Coordinator() : registry_(kHeartbeatTimeout, kTaskTimeout) {
         }
 
-        void setLoop(xmr::net::EventLoop* loop) {
+        void setLoop(EventLoop* loop) {
             loop_ = loop;
         }
 
@@ -181,8 +170,8 @@ namespace {
             loop_->addInterval(kTick, [this] { tick(); });
         }
 
-        void onConnect(ConnId id, std::shared_ptr<Conn> conn) {
-            conns_[id] = std::move(conn);
+        void onConnect(std::shared_ptr<ConnState> conn) {
+            conns_[conn->id] = std::move(conn);
         }
 
         /// @brief master的控TCP收到了过来的消息 可能是控制端口 可能是数据端口
@@ -202,7 +191,7 @@ namespace {
             return error_;
         }
 
-        std::unordered_map<ConnId, std::shared_ptr<Conn> >& conns() {
+        std::unordered_map<ConnId, std::shared_ptr<ConnState> >& conns() {
             return conns_;
         }
 
@@ -258,11 +247,11 @@ namespace {
             requestShutdown();
         }
 
-        xmr::net::EventLoop* loop_ = nullptr;
+        EventLoop* loop_ = nullptr;
         // worker管理器
         xmr::WorkerRegistry registry_;
         // master的控制端口的TCP 都有谁连接进来的 可能是client 可能是worker
-        std::unordered_map<ConnId, std::shared_ptr<Conn> > conns_;
+        std::unordered_map<ConnId, std::shared_ptr<ConnState> > conns_;
         // k=worker v=TCP连接
         std::unordered_map<std::string, ConnId> byWorker_;
         // worker的数据面地址 host + port
@@ -423,7 +412,7 @@ namespace {
             return;
         }
         // worker或者client跟master控制端口之间的TCP连接
-        Conn& conn = *it->second;
+        ConnState& conn = *it->second;
         try {
             switch (frame.header.type) {
                 case xmr::protocol::MessageType::Submit: {
@@ -662,7 +651,7 @@ namespace {
         if (it == conns_.end()) {
             return;
         }
-        const std::shared_ptr<Conn> conn = it->second;
+        const std::shared_ptr<ConnState> conn = it->second;
         if (!conn->workerId.empty()) {
             if (!pluginHash_.empty() && conn->plugins.count(pluginHash_) != 0 && pluginReady_ > 0) {
                 --pluginReady_;
@@ -673,9 +662,6 @@ namespace {
             workerData_.erase(conn->workerId);
         }
         conns_.erase(it);
-        conn->loop->queueInLoop([conn] {
-            conn->loop->remove(conn->connection.fd());
-        });
     }
 
     std::vector<std::string> Coordinator::fetchPlan() const {
@@ -801,13 +787,13 @@ namespace {
         if (it == conns_.end()) {
             return;
         }
-        const std::shared_ptr<Conn> conn = it->second;
-        const auto bytes = xmr::protocol::makeFrame(type, requestId, body, flags);
-        // 丢到线程循环器 发送到TCP对端
-        conn->loop->queueInLoop([conn, bytes] {
-            conn->out.append(bytes);
-            flushConn(*conn);
-        });
+        xmr::protocol::Frame frame;
+        frame.header.type = type;
+        frame.header.flags = flags;
+        frame.header.requestId = requestId;
+        frame.body = body;
+        // 丢到它自己的reactor线程 编码后发送到TCP对端
+        it->second->channel->write(std::any(std::move(frame)));
     }
 
     // 大blob分块发送 最后一块不带More
@@ -877,85 +863,36 @@ namespace {
         }
     }
 
-    // 由worker reactor线程调用 更新这个连接的读写关注事件
-    void updateInterest(Conn& conn) {
-        std::uint32_t events = xmr::net::kReadable;
-        if (!conn.out.empty()) {
-            events |= xmr::net::kWritable;
+    /// @brief 连到master的一条连接 收到一帧就交给coordinator线程处理
+    class MasterConnHandler : public ChannelInboundHandler {
+    public:
+        MasterConnHandler(std::shared_ptr<ConnState> state, Coordinator* coordinator, EventLoop* coordinatorLoop)
+            : state_(std::move(state)), coordinator_(coordinator), coordinatorLoop_(coordinatorLoop) {
         }
-        conn.loop->modify(conn.connection.fd(), events);
-    }
 
-    /// @brief master用TCP连接给对端发消息
-    /// @param conn TCP连接
-    void flushConn(Conn& conn) {
-        if (conn.broken) {
-            return;
-        }
-        while (!conn.out.empty()) {
-            // 每次TCP发出去了多少数据
-            std::size_t sent = 0;
-            const xmr::net::IoStatus status = xmr::net::sendFrom(conn.connection.fd(), conn.out.data(), conn.out.size(), sent);
-            if (status == xmr::net::IoStatus::Ok) {
-                // 把发出去的数据从缓冲区摘掉
-                conn.out.consume(sent);
-            } else if (status == xmr::net::IoStatus::WouldBlock) {
-                break;
-            } else {
-                conn.broken = true;
-                conn.coordinatorLoop->queueInLoop([owner = conn.owner, id = conn.id] {
-                    owner->onDisconnect(id);
-                });
+        void channelRead(ChannelHandlerContext& ctx, std::any& message) override {
+            xmr::protocol::Frame* frame = std::any_cast<xmr::protocol::Frame>(&message);
+            if (frame == nullptr) {
                 return;
             }
-        }
-        updateInterest(conn);
-    }
-
-    /// @brief 连接到master的TCP 可能连的是控制端口 也可能连的是数据端 不管是哪个端口的TCP连接 它的读写都放在就一起处理 可能通过消息类型区分出来
-    /// @param conn 里面能拿到TCP连接
-    void serveConn(std::shared_ptr<Conn> conn) {
-        // 读写任务交给读写线程
-        conn->loop->add(conn->connection.fd(), xmr::net::kReadable,
-            [conn](std::uint32_t events) {
-                // 不管是控制端口还是数据端口 只要有人向master发送消息 master这边就判断TCP收到数据了
-                if (conn->broken) {
-                    return;
-                }
-                // redis中有这种读写顺序防护
-                if (events & xmr::net::kWritable) {
-                    flushConn(*conn);
-                }
-                if (events & (xmr::net::kReadable | xmr::net::kBroken)) {
-                    bool closed = false;
-                    while (true) {
-                        // 把TCP传过来的数据读到缓冲区
-                        const xmr::net::IoStatus status = xmr::net::recvInto(conn->connection.fd(), conn->in);
-                        if (status == xmr::net::IoStatus::Ok) {
-                            continue;
-                        }
-                        if (status == xmr::net::IoStatus::WouldBlock) {
-                            break;
-                        }
-                        closed = true;
-                        break;
-                    }
-                    // 网络传过来的大端序解码
-                    xmr::protocol::FrameDecoder decoder(conn->in);
-                    while (auto frame = decoder.next()) {
-                        conn->coordinatorLoop->queueInLoop([conn, frame = *frame]() mutable {
-                            conn->owner->onFrame(conn->id, frame);
-                        });
-                    }
-                    if (closed) {
-                        conn->broken = true;
-                        conn->coordinatorLoop->queueInLoop([conn] {
-                            conn->owner->onDisconnect(conn->id);
-                        });
-                    }
-                }
+            auto state = state_;
+            coordinatorLoop_->runInLoop([state, frame = *frame, this]() mutable {
+                coordinator_->onFrame(state->id, frame);
             });
-    }
+        }
+
+        void channelInactive(ChannelHandlerContext& ctx) override {
+            auto state = state_;
+            coordinatorLoop_->runInLoop([state, this] {
+                coordinator_->onDisconnect(state->id);
+            });
+        }
+
+    private:
+        std::shared_ptr<ConnState> state_;
+        Coordinator* coordinator_;
+        EventLoop* coordinatorLoop_;
+    };
 } // namespace
 
 int main(int argc, char** argv) {
@@ -979,10 +916,46 @@ int main(int argc, char** argv) {
         }
         // 控制端口
         const auto [host,port] = parseListen(listen, "127.0.0.1");
+
+        Coordinator coordinator;
+        // 独占的线程 只负责跑master自己
+        EventLoop coordinatorLoop;
+        // 负责master接收新来的TCP连接 可能是连接的控制端口 也可能是连接的数据端口
+        EventLoopGroup acceptGroup(1);
+        // master真正干活的线程
+        EventLoopGroup ioGroup(kIoThreads);
+        // master给worker连接进来的TCP编号
+        std::atomic<ConnId> nextConnId{1};
+
+        std::promise<void> donePromise;
+        std::future<void> doneFuture = donePromise.get_future();
+        coordinator.setOnShutdown([&donePromise] { donePromise.set_value(); });
+        coordinator.setLoop(&coordinatorLoop);
+
+        std::thread coordinatorThread([&] { coordinatorLoop.run(); });
+        acceptGroup.start();
+        ioGroup.start();
+
+        // master启动起来
+        coordinatorLoop.runInLoop([&] { coordinator.start(); });
+
+        // 处理新连接：控制端口/数据端口都走同一套 用消息类型区分
+        auto childHandler = [&](Channel& channel) {
+            auto conn = std::make_shared<ConnState>();
+            conn->id = nextConnId.fetch_add(1);
+            conn->host = peerHost(channel.fd());
+            conn->channel = channel.shared_from_this();
+            channel.pipeline().addLast(std::make_shared<xmr::protocol::FrameEncoder>());
+            channel.pipeline().addLast(std::make_shared<xmr::protocol::FrameDecoder>());
+            channel.pipeline().addLast(std::make_shared<MasterConnHandler>(conn, &coordinator, &coordinatorLoop));
+            coordinatorLoop.runInLoop([&coordinator, conn] { coordinator.onConnect(conn); });
+        };
+
         // 监听在控制端口上
-        xmr::net::Listener listener(host, port);
-        xmr::net::setNonBlocking(listener.fd());
-        std::cout << "LISTENING " << host << ":" << listener.port() << std::endl;
+        ServerBootstrap controlServer;
+        controlServer.group(acceptGroup, ioGroup).childHandler(childHandler);
+        controlServer.bind(host, port);
+        std::cout << "LISTENING " << host << ":" << controlServer.port() << std::endl;
 
         // 数据面端口 worker拉map的input/插件 client上传插件
         std::string dataHost = host;
@@ -992,101 +965,34 @@ int main(int argc, char** argv) {
             dataHost = dh;
             dataPort = dp;
         }
-        xmr::net::Listener dataListener(dataHost, dataPort);
-        xmr::net::setNonBlocking(dataListener.fd());
-        std::cout << "DATA_LISTENING " << dataHost << ":" << dataListener.port() << std::endl;
+        ServerBootstrap dataServer;
+        dataServer.group(acceptGroup, ioGroup).childHandler(childHandler);
+        dataServer.bind(dataHost, dataPort);
+        std::cout << "DATA_LISTENING " << dataHost << ":" << dataServer.port() << std::endl;
 
-        Coordinator coordinator;
-        // 独占的线程 只负责跑master自己
-        xmr::net::EventLoop coordinatorLoop;
-        // 负责master接收新来的TCP连接 可能是连接的控制端口 也可能是连接的数据端口
-        xmr::net::EventLoop bossLoop;
-        // master真正干活的线程
-        xmr::net::EventLoopGroup ioGroup(kIoThreads);
-        // master给worker连接进来的TCP编号
-        std::atomic<ConnId> nextConnId{1};
-
-        std::promise<void> donePromise;
-        std::future<void> doneFuture = donePromise.get_future();
-        coordinator.setOnShutdown([&donePromise] { donePromise.set_value(); });
-        coordinator.setLoop(&coordinatorLoop);
-        coordinator.setDataAddress(dataHost, dataListener.port());
-
-        std::thread coordinatorThread([&] { coordinatorLoop.run(); });
-        ioGroup.start();
-        std::thread bossThread([&] { bossLoop.run(); });
-
-        // master启动起来
-        coordinatorLoop.runInLoop([&] { coordinator.start(); });
-
-        // 处理连接请求 可能是有人连master的控制端口 可能是有人连master的数据端口
-        auto acceptFrom = [&](xmr::net::Listener& acceptor) {
-            try {
-                while (true) {
-                    // 从服务端全连接队列拿TCP连接
-                    xmr::net::Connection connection;
-                    const xmr::net::IoStatus status = acceptor.acceptNonBlocking(connection);
-                    if (status == xmr::net::IoStatus::WouldBlock) {
-                        break;
-                    }
-                    if (status != xmr::net::IoStatus::Ok) {
-                        throw std::runtime_error("accept failed");
-                    }
-                    xmr::net::setNonBlocking(connection.fd());
-                    auto conn = std::make_shared<Conn>();
-                    // tcp连接
-                    conn->connection = std::move(connection);
-                    // worker的ip
-                    conn->host = peerHost(conn->connection.fd());
-                    conn->id = nextConnId.fetch_add(1);
-                    conn->owner = &coordinator;
-                    conn->coordinatorLoop = &coordinatorLoop;
-                    // 真正干活的线程负责TCP读写
-                    conn->loop = ioGroup.next();
-                    xmr::net::EventLoop* workerLoop = conn->loop;
-                    coordinatorLoop.runInLoop([&coordinator, conn, workerLoop] {
-                        coordinator.onConnect(conn->id, conn);
-                        workerLoop->runInLoop([conn] { serveConn(conn); });
-                    });
-                }
-            } catch (const std::exception&) {
-            }
-        };
-        bossLoop.runInLoop([&] {
-            // 控制端口的连接请求处理
-            bossLoop.add(listener.fd(), xmr::net::kReadable, [&](std::uint32_t) { acceptFrom(listener); });
-            // 数据端口的连接请求处理
-            bossLoop.add(dataListener.fd(), xmr::net::kReadable, [&](std::uint32_t) { acceptFrom(dataListener); });
+        coordinatorLoop.runInLoop([&coordinator, dataHost, port = dataServer.port()] {
+            coordinator.setDataAddress(dataHost, port);
         });
 
         doneFuture.wait();
 
-        bossLoop.stop();
+        controlServer.close();
+        dataServer.close();
         coordinatorLoop.stop();
         ioGroup.stop();
-        bossThread.join();
+        acceptGroup.stop();
         coordinatorThread.join();
 
-        if (bossLoop.error()) {
-            std::rethrow_exception(bossLoop.error());
-        }
-        if (coordinatorLoop.error()) {
-            std::rethrow_exception(coordinatorLoop.error());
-        }
-
+        // 停掉循环后 直接用阻塞IO给每条连接发Shutdown 等对端关掉
         for (auto& [id, conn] : coordinator.conns()) {
             try {
                 const auto frame = xmr::protocol::makeFrame(xmr::protocol::MessageType::Shutdown, 0, xmr::protocol::Shutdown{}.encode());
-                conn->out.append(frame);
-                xmr::net::setBlocking(conn->connection.fd());
-                while (!conn->out.empty()) {
-                    const std::size_t pending = conn->out.size();
-                    xmr::net::sendAll(conn->connection.fd(), conn->out.data(), pending);
-                    conn->out.consume(pending);
-                }
-                ::shutdown(conn->connection.fd(), SHUT_WR);
+                const int fd = conn->channel->fd();
+                setBlocking(fd);
+                sendAll(fd, frame.data(), frame.size());
+                ::shutdown(fd, SHUT_WR);
                 char buffer[256];
-                while (::read(conn->connection.fd(), buffer, sizeof(buffer)) > 0) {
+                while (::read(fd, buffer, sizeof(buffer)) > 0) {
                 }
             } catch (const std::exception&) {
                 // 对端已断开 忽略

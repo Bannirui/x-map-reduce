@@ -1,10 +1,15 @@
 #pragma once
 
-#include"net/net.h"
+#include"net/channel.h"
+#include"net/event_loop_group.h"
 #include"protocol/framing.h"
 #include"protocol/protocol.h"
 
+#include<condition_variable>
 #include<cstdint>
+#include<deque>
+#include<memory>
+#include<mutex>
 #include<string>
 #include<vector>
 
@@ -32,6 +37,12 @@ namespace xmr::client {
         // endpoint是host:port
         explicit Client(const std::string& endpoint);
 
+        ~Client();
+
+        Client(const Client&) = delete;
+
+        Client& operator=(const Client&) = delete;
+
         /**
          * 发送Submit提交任务 等SubmitAck
          * @return false表示被master拒了
@@ -50,7 +61,15 @@ namespace xmr::client {
 
         protocol::Frame receive();
 
-        net::Connection connection_;
-        net::ByteBuffer in_;
+        void onFrame(protocol::Frame frame);
+
+        void onDisconnected();
+
+        EventLoopGroup group_;
+        std::shared_ptr<Channel> control_;
+        std::mutex mutex_;
+        std::condition_variable received_;
+        std::deque<protocol::Frame> inbox_;
+        bool disconnected_ = false;
     };
 } // namespace xmr::client

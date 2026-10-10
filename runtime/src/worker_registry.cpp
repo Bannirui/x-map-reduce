@@ -89,7 +89,7 @@ namespace xmr {
             return false;
         }
         timers_.cancel(it->second.taskWatchdog);
-        it->second.taskWatchdog = net::TimerQueue::kInvalidId;
+        it->second.taskWatchdog = TimerQueue::kInvalidId;
         it->second.state = WorkerState::Registered;
         it->second.task.reset();
         return true;
@@ -136,7 +136,7 @@ namespace xmr {
             return std::nullopt;
         }
         timers_.cancel(it->second.taskWatchdog);
-        it->second.taskWatchdog = net::TimerQueue::kInvalidId;
+        it->second.taskWatchdog = TimerQueue::kInvalidId;
         std::optional<Task> task = it->second.task;
         it->second.task.reset();
         return task;
@@ -170,10 +170,10 @@ namespace xmr {
         // 心跳看门狗到期了 说明整个心跳阈值期间没有收到woker的心跳 判定它下线了
         it->second.state = WorkerState::Lost;
         // 心跳看门狗的定时任务编号抹成哨兵值
-        it->second.watchdog = net::TimerQueue::kInvalidId;
+        it->second.watchdog = TimerQueue::kInvalidId;
         // 任务超时看门狗不在这里处理 任务留在entry里等master回收重发
         timers_.cancel(it->second.taskWatchdog);
-        it->second.taskWatchdog = net::TimerQueue::kInvalidId;
+        it->second.taskWatchdog = TimerQueue::kInvalidId;
         // 判定主观下线
         lost_.push_back(id);
     }
@@ -187,6 +187,6 @@ namespace xmr {
         timedOutTasks_.push_back(*it->second.task);
         // 这个worker没有按照要求时间完成 已经不配拥有这个任务了
         it->second.task.reset();
-        it->second.taskWatchdog = net::TimerQueue::kInvalidId;
+        it->second.taskWatchdog = TimerQueue::kInvalidId;
     }
 } // namespace xmr

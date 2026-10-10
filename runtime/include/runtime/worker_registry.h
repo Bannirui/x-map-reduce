@@ -33,8 +33,8 @@ namespace xmr {
     // master负责worker资源管理+任务调度 把资源管理抽象出来
     class WorkerRegistry {
     public:
-        using Clock = net::TimerQueue::Clock;
-        using TimePoint = net::TimerQueue::TimePoint;
+        using Clock = TimerQueue::Clock;
+        using TimePoint = TimerQueue::TimePoint;
 
         /**
          * @param heartbeatTimeout worker心跳超时的阈值是多少
@@ -129,9 +129,9 @@ namespace xmr {
             WorkerState state = WorkerState::Registered;
             TimePoint lastSeen;
             // master对worker心跳看门狗定时任务编号 定时任务编号0是哨兵无效值 有效值是从1开始的
-            net::TimerQueue::TimerId watchdog = net::TimerQueue::kInvalidId;
+            TimerQueue::TimerId watchdog = TimerQueue::kInvalidId;
             // 单个任务的超时看门狗定时任务编号
-            net::TimerQueue::TimerId taskWatchdog = net::TimerQueue::kInvalidId;
+            TimerQueue::TimerId taskWatchdog = TimerQueue::kInvalidId;
             // worker处理的任务
             std::optional<Task> task;
         };
@@ -164,7 +164,7 @@ namespace xmr {
         // master管理着注册进来的worker
         std::unordered_map<std::string, Entry> workers_;
         // 定时任务队列
-        net::TimerQueue timers_;
+        TimerQueue timers_;
         // master判定主观下线的worker
         std::vector<std::string> lost_;
         // worker执行超时 master回收任务 需要重发的任务

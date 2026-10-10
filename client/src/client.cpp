@@ -1,10 +1,16 @@
 #include"xmr/client/client.h"
 
-#include"protocol/framing.h"
+#include"net/bootstrap.h"
+#include"net/channel_handler.h"
+#include"net/channel_handler_context.h"
+#include"net/channel_pipeline.h"
+#include"protocol/frame_codec.h"
 #include"protocol/messages.h"
 
 #include<algorithm>
+#include<any>
 #include<fstream>
+#include<functional>
 #include<iterator>
 #include<stdexcept>
 #include<utility>
@@ -19,29 +25,86 @@ namespace xmr::client {
             return {endpoint.substr(0, colon),
                     static_cast<std::uint16_t>(std::stoul(endpoint.substr(colon + 1)))};
         }
+
+        class InboxHandler : public ChannelInboundHandler {
+        public:
+            InboxHandler(std::function<void(protocol::Frame)> onFrame, std::function<void()> onDisconnected)
+                : onFrame_(std::move(onFrame)), onDisconnected_(std::move(onDisconnected)) {
+            }
+
+            void channelRead(ChannelHandlerContext& ctx, std::any& message) override {
+                protocol::Frame* frame = std::any_cast<protocol::Frame>(&message);
+                if (frame != nullptr) {
+                    onFrame_(std::move(*frame));
+                }
+            }
+
+            void channelInactive(ChannelHandlerContext& ctx) override {
+                onDisconnected_();
+            }
+
+        private:
+            std::function<void(protocol::Frame)> onFrame_;
+            std::function<void()> onDisconnected_;
+        };
     } // namespace
 
-    Client::Client(const std::string& endpoint) {
+    Client::Client(const std::string& endpoint) : group_(1) {
         const auto [host,port] = parseEndpoint(endpoint);
-        connection_ = net::connectTo(host, port);
+        group_.start();
+        ClientBootstrap bootstrap;
+        bootstrap.group(group_).handler([this](Channel& channel) {
+            channel.pipeline().addLast(std::make_shared<protocol::FrameEncoder>());
+            channel.pipeline().addLast(std::make_shared<protocol::FrameDecoder>());
+            channel.pipeline().addLast(std::make_shared<InboxHandler>(
+                [this](protocol::Frame frame) { onFrame(std::move(frame)); },
+                [this] { onDisconnected(); }));
+        });
+        control_ = bootstrap.connect(host, port);
+    }
+
+    Client::~Client() {
+        if (control_) {
+            control_->close();
+        }
+        group_.stop();
+    }
+
+    void Client::onFrame(protocol::Frame frame) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            inbox_.push_back(std::move(frame));
+        }
+        received_.notify_one();
+    }
+
+    void Client::onDisconnected() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            disconnected_ = true;
+        }
+        received_.notify_all();
     }
 
     void Client::send(protocol::MessageType type, std::uint32_t requestId,
                       const std::vector<std::uint8_t>& body, std::uint16_t flags) {
-        const auto frame = protocol::makeFrame(type, requestId, body, flags);
-        net::sendAll(connection_.fd(), frame.data(), frame.size());
+        protocol::Frame frame;
+        frame.header.type = type;
+        frame.header.flags = flags;
+        frame.header.requestId = requestId;
+        frame.body = body;
+        control_->write(std::any(std::move(frame)));
     }
 
     protocol::Frame Client::receive() {
-        while (true) {
-            protocol::FrameDecoder decoder(in_);
-            if (auto frame = decoder.next()) {
-                return std::move(*frame);
-            }
-            if (net::recvInto(connection_.fd(), in_) == net::IoStatus::Closed) {
-                throw std::runtime_error("master disconnected");
-            }
+        std::unique_lock<std::mutex> lock(mutex_);
+        received_.wait(lock, [this] { return !inbox_.empty() || disconnected_; });
+        if (inbox_.empty()) {
+            throw std::runtime_error("master disconnected");
         }
+        protocol::Frame frame = std::move(inbox_.front());
+        inbox_.pop_front();
+        return frame;
     }
 
     bool Client::submit(const SubmitRequest& request, std::string& reason) {
@@ -97,7 +160,11 @@ namespace xmr::client {
         }
 
         // 输入和插件都走数据面单独连接上传
-        net::Connection data = net::connectTo(ack.dataHost, static_cast<std::uint16_t>(ack.dataPort));
+        ClientBootstrap dataBootstrap;
+        dataBootstrap.group(group_).handler([](Channel& channel) {
+            channel.pipeline().addLast(std::make_shared<protocol::FrameEncoder>());
+        });
+        std::shared_ptr<Channel> data = dataBootstrap.connect(ack.dataHost, static_cast<std::uint16_t>(ack.dataPort));
         for (std::size_t index = 0; index < inputs.size(); ++index) {
             const std::vector<std::uint8_t>& blob = inputs[index];
             std::size_t offset = 0;
@@ -109,9 +176,11 @@ namespace xmr::client {
                 chunk.payload.assign(blob.begin() + static_cast<std::ptrdiff_t>(offset),
                                      blob.begin() + static_cast<std::ptrdiff_t>(offset + n));
                 const bool more = offset + n < blob.size();
-                const auto frame = protocol::makeFrame(protocol::MessageType::InputBlob, 0, chunk.encode(),
-                                                       more ? static_cast<std::uint16_t>(protocol::Flag::More) : 0);
-                net::sendAll(data.fd(), frame.data(), frame.size());
+                protocol::Frame frame;
+                frame.header.type = protocol::MessageType::InputBlob;
+                frame.header.flags = more ? static_cast<std::uint16_t>(protocol::Flag::More) : 0;
+                frame.body = chunk.encode();
+                data->write(std::any(std::move(frame)));
                 offset += n;
             } while (offset < blob.size());
         }
@@ -126,12 +195,16 @@ namespace xmr::client {
                 chunk.payload.assign(plugin.begin() + static_cast<std::ptrdiff_t>(offset),
                                      plugin.begin() + static_cast<std::ptrdiff_t>(offset + n));
                 const bool more = offset + n < plugin.size();
-                const auto frame = protocol::makeFrame(protocol::MessageType::Plugin, 0, chunk.encode(),
-                                                       more ? static_cast<std::uint16_t>(protocol::Flag::More) : 0);
-                net::sendAll(data.fd(), frame.data(), frame.size());
+                protocol::Frame frame;
+                frame.header.type = protocol::MessageType::Plugin;
+                frame.header.flags = more ? static_cast<std::uint16_t>(protocol::Flag::More) : 0;
+                frame.body = chunk.encode();
+                data->write(std::any(std::move(frame)));
                 offset += n;
             } while (offset < plugin.size());
         }
+        // 数据面写完后延迟关闭 排空出站缓冲再真正关掉
+        data->close();
         return true;
     }
 
