@@ -4,34 +4,36 @@
 #include<cstdint>
 #include<vector>
 
-namespace xmr::net {
-    // 模仿Netty
-    class ByteBuffer {
-    public:
-        void append(const void* data, std::size_t size);
+// 模仿Netty
+class ByteBuffer {
+public:
+    ByteBuffer() = default;
 
-        void append(const std::vector<std::uint8_t>& data);
+    explicit ByteBuffer(const std::vector<std::uint8_t>& data);
 
-        const std::uint8_t* data() const noexcept {
-            return storage_.data() + readOffset_;
-        }
+    void append(const void* data, std::size_t size);
 
-        std::size_t size() const noexcept {
-            return storage_.size() - readOffset_;
-        }
+    void append(const std::vector<std::uint8_t>& data);
 
-        bool empty() const noexcept {
-            return size() == 0;
-        }
+    const std::uint8_t* data() const noexcept {
+        return storage_.data() + readOffset_;
+    }
 
-        void consume(std::size_t size);
+    std::size_t size() const noexcept {
+        return storage_.size() - readOffset_;
+    }
 
-        std::vector<std::uint8_t> take(std::size_t size);
+    bool empty() const noexcept {
+        return size() == 0;
+    }
 
-    private:
-        void compact();
+    void consume(std::size_t size);
 
-        std::vector<std::uint8_t> storage_;
-        std::size_t readOffset_ = 0;
-    };
-} // namespace xmr::net
+    std::vector<std::uint8_t> take(std::size_t size);
+
+private:
+    void compact();
+
+    std::vector<std::uint8_t> storage_;
+    std::size_t readOffset_ = 0;
+};

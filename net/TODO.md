@@ -1,0 +1,73 @@
+TODO
+---
+
+从「transport 原语」升成「网络框架」，再独立成库。
+
+- [ ] 抽离准备
+  - [X] 保持纯叶子：只依赖 `Threads`，不引用 `protocol`/`mapreduce`/`runtime`
+  - [X] 去 namespace：整个 net 库放全局作用域
+    - [X] 旧 transport 原语去掉 `xmr::net`
+    - [X] 同步改 `protocol/include/protocol/framing.h` 的前向声明为全局 `class ByteBuffer;`
+    - [X] 更新所有消费者（protocol/server/runtime/client/tests）的 `net::` 引用
+  - [X] target 改名：`x-net` -> `xnet`（含 alias `xnet::xnet`），消费者同步
+  - [X] CMake：独立骨架（顶层 `project()` + `include(CTest)`）、`install()` / `export()`、`find_package(xnet)` 可用（已用消费者工程验证）
+  - [X] 测试迁到 `net/tests/`，独立构建可 `ctest`（13 个）
+  - [ ] `git subtree split -P net` 拆库，push 到独立 GitHub 仓库
+  - [ ] MapReduce 侧改用 submodule 或 `FetchContent` 引用
+- [ ] 框架层（仿 Netty）
+  - [X] `Channel`：fd + EventLoop + 读写缓冲 + 发送队列
+    - [X] readable 事件 -> `recvInto` -> `fireChannelRead`
+    - [X] `write` -> 缓冲 + `sendFrom`，WouldBlock 时挂 kWritable
+    - [X] `close`：`fireChannelInactive` + 延迟从 EventLoop 摘除（避免在回调中删除自身）
+  - [X] `ChannelPipeline` / `ChannelHandler` / `ChannelHandlerContext`
+    - [X] inbound：`channelActive` / `channelRead` / `channelReadComplete` / `channelInactive` / `exceptionCaught`
+    - [X] `ChannelHandlerContext`：逐级传播（`fireChannelXxx` 从 index+1 继续）、`write`/`flush`/`close` 回写
+    - [X] 把 `EventLoop::add` 的单回调泛化成 handler 链
+  - [X] outbound 走 handler 链
+    - [X] `ChannelOutboundHandler`：出站从 tail 向 head 遍历，head 落 `Channel::writeTransport`
+    - [X] `ctx.write` 从 `index_` 反向传播，跳过非出站 handler
+    - [X] `flush` / `close` 也走出站链（`ctx.flush`/`ctx.close` → `flushFrom`/`closeFrom` → `flushTransport`/`closeTransport`）
+    - [X] `ChannelOutboundHandler` 默认实现透传（`ctx.write`/`ctx.flush`/`ctx.close`），未 override 不吞事件
+    - [X] outbound 链测试（`tests/outbound_test.cpp`）
+    - [ ] `connect` 走出站链（现 `ClientBootstrap::connect` 阻塞，管道建立前完成）
+  - [X] `TcpServer`：`ServerBootstrap` 的 accept 循环 + 每连接建 `Channel`（见下）
+  - [ ] `TcpClient` + 异步 connect（现 `connectTo` 阻塞）
+  - [X] handler 绑定 EventLoop 线程，off-loop `write` 走 `runInLoop` 排队
+  - [X] echo server 测试（`tests/channel_test.cpp`）
+- [ ] 用户层入口（仿 Netty Bootstrap）
+  - [X] `ServerBootstrap`：`group`（单组/ boss+worker）/ `childHandler` / `bind` / `port` / `close`
+  - [X] `ClientBootstrap`：`group` / `handler` / `connect`（阻塞）/ 返回 `shared_ptr<Channel>`
+  - [X] bootstrap 测试（`tests/bootstrap_test.cpp`）
+  - [X] `SocketOption` / `setSocketOption`（TcpNoDelay/KeepAlive/ReuseAddress/ReusePort/缓冲区）
+  - [X] `option` / `childOption`：`ServerBootstrap`（父/子 socket）+ `backlog`；`ClientBootstrap::option`
+  - [X] option 测试（`tests/option_test.cpp`，`getsockopt` 校验）
+- [ ] codec 层（通用，不认识 XMRP）
+  - [X] 管道消息改为 `std::any`（对应 Netty `Object`），字节层 `ByteBuffer`、解码产出任意 `T`
+  - [X] `ByteToMessageDecoder`：累积 `ByteBuffer`，循环 decode，解决粘包/拆包
+  - [X] `MessageToByteEncoder<T>`：`T -> ByteBuffer`
+  - [X] `LengthFieldBasedFrameDecoder`：参数化 length 偏移/长度/调整量
+  - [X] codec 测试（`tests/codec_test.cpp`，拆包+重组+编码）
+  - [X] `protocol::FrameDecoder` 改为 `LengthFieldBasedFrameDecoder` 的实例（`protocol/include/protocol/frame_codec.h`）
+    - [X] 原 pull 式解码改名为 `FrameParser`（保留给阻塞式客户端拉取）
+    - [X] `protocol::FrameEncoder`：`MessageToByteEncoder<Frame>`
+    - [X] `tests/frame_codec_test.cpp` 端到端验证 XMRP 拆包+回显
+  - [ ] master/worker/client 改用 `Bootstrap` + 管道
+    - [X] `worker.cpp`：control 走 `ClientBootstrap`，data 面走 `ServerBootstrap` + `DataHandler`；心跳用 `EventLoop::addInterval`，线程池完成回调走 `runInLoop`
+    - [X] `master.cpp`：control/data 两个 `ServerBootstrap` + `MasterConnHandler`；每连接一个 `Channel`+`ConnState`，帧在 IO 线程收、marshal 到 coordinator 线程处理，发送走 `channel->write`
+    - [X] `client.cpp`：内部改 `ClientBootstrap` + 管道，后台 loop + 队列把事件驱动包成原阻塞 API（`submit`/`wait`/`shutdown` 不变）
+    - [ ] `FrameParser`（pull 式）仍被 `worker.cpp` 的阻塞 `pullStream` 数据面拉取和 `tests/framing_test.cpp` 使用
+  - [X] `DelimiterBasedFrameDecoder`：分隔符拆包（累积+扫描，等价状态机模型，见主仓库 TODO「Netty的codex拆包用的是状态机」）
+  - [X] delimiter 测试（`tests/delimiter_test.cpp`）
+- [ ] 健壮性
+  - [X] `Channel` 延迟关闭：出站缓冲排空后再真正关闭（`close` / `closeNow`），供 handler 写完再关连接
+  - [X] 写缓冲水位（backpressure / watermark）：`Channel` 高低水位 + `channelWritabilityChanged`
+  - [X] 空闲检测（idle handler）：`IdleStateHandler`（reader/writer/all）复用 `EventLoop` 定时器 + `userEventTriggered`
+  - [X] 健壮性测试（`tests/robustness_test.cpp`，watermark + idle）
+  - [X] 半关闭处理与 fd 生命周期
+    - [X] 读方向 EOF：半关闭读方向（`reading_=false`），有待发数据先发完再关，否则立即关
+    - [X] fd 生命周期：`closeNow` 把 fd 所有权从 `Connection` 取出，交给事件循环先 `remove`（摘 epoll）再 `close`
+    - [X] `Poller::remove` 容忍 `ENOENT`/`EBADF`，重复移除/已关闭不再是异常
+    - [X] 收口 `Poller::remove` 的竞态（不再异常拖停事件循环）
+    - [X] 半关闭测试（`tests/half_close_test.cpp`）
+~~- [ ] 跨平台~~
+  ~~- [ ] 仅支持 Linux/epoll，不做跨平台（kqueue / IOCP 不做）~~
