@@ -58,7 +58,7 @@ In a third shell (also from `build/bin`):
 ```sh
 cd ./build/bin
 
-./xmr-submit --master 127.0.0.1:9527 \
+./x-submit --master 127.0.0.1:9527 \
   --job word_count \
   --plugin ../lib/word_count.so \
   --reducers 3 \

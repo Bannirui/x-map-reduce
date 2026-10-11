@@ -1,6 +1,6 @@
 #include"protocol/framing.h"
 
-#include"net/buffer.h"
+#include <xnet/buffer.h>
 
 namespace xmr::protocol {
     std::size_t FrameParser::buffered() const noexcept {

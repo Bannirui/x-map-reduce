@@ -1,7 +1,8 @@
-#include "net/buffer.h"
-#include "net/net.h"
 #include "protocol/framing.h"
 #include "protocol/messages.h"
+
+#include <xnet/buffer.h>
+#include <xnet/net.h>
 
 #include <cstdint>
 #include <iostream>

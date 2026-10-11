@@ -1,7 +1,8 @@
 #include "protocol/frame_codec.h"
 
-#include "net/buffer.h"
 #include "protocol/protocol.h"
+
+#include <xnet/buffer.h>
 
 #include <any>
 #include <cstdint>

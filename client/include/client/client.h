@@ -1,9 +1,10 @@
 #pragma once
 
-#include"net/channel.h"
-#include"net/event_loop_group.h"
 #include"protocol/framing.h"
 #include"protocol/protocol.h"
+
+#include <xnet/channel.h>
+#include <xnet/event_loop_group.h>
 
 #include<condition_variable>
 #include<cstdint>

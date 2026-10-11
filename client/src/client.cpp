@@ -1,11 +1,12 @@
-#include"xmr/client/client.h"
+#include"client/client.h"
 
-#include"net/bootstrap.h"
-#include"net/channel_handler.h"
-#include"net/channel_handler_context.h"
-#include"net/channel_pipeline.h"
 #include"protocol/frame_codec.h"
 #include"protocol/messages.h"
+
+#include <xnet/bootstrap.h>
+#include <xnet/channel_handler.h>
+#include <xnet/channel_handler_context.h>
+#include <xnet/channel_pipeline.h>
 
 #include<algorithm>
 #include<any>

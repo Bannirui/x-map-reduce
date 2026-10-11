@@ -1,6 +1,6 @@
-#include"xmr/client/capi.h"
+#include"client/capi.h"
 
-#include"xmr/client/client.h"
+#include"client/client.h"
 
 #include<algorithm>
 #include<cstring>

@@ -1,4 +1,4 @@
-#include"xmr/client/client.h"
+#include"client/client.h"
 
 #include<cstdint>
 #include<iostream>
