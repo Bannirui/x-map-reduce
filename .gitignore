@@ -67,7 +67,11 @@ vcpkg_installed/
 Testing/
 .cache/
 
-[bB][uU][iI][lL][dD]
-.vscode
 .idea
+
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+[bB][uU][iI][lL][dD]
 AGENTS.md
