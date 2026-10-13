@@ -1,63 +1,126 @@
 #pragma once
 
-#include<array>
-#include<cstddef>
-#include<cstdint>
-#include<optional>
-#include<stdexcept>
-#include<string>
-#include<string_view>
-#include<vector>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace xmr::protocol {
     // 协议头顶格4字节 魔数校验
     inline constexpr std::array<std::uint8_t, 4> kMagic{'X', 'M', 'R', 'P'};
-    inline constexpr std::uint8_t kVersion = 1;
+    inline constexpr std::uint8_t kVersion = 3;
     // 协议=协议头16字节+body
     inline constexpr std::size_t kHeaderSize = 16;
     // 约定一次消息传的大小上限64MB
     inline constexpr std::uint32_t kMaxPayloadBytes = 64u * 1024u * 1024u;
-    // 发送大blob时每块的大小 配合flags.More+offset做流式分块
+    /**
+     * 一个消息帧的硬限制是64M 当数据真的挺大的时候但是<64M 还是要拆分多个消息帧出去
+     * 防止EventLoop发送大数据占用太长时间导致其他的TCP读写没办法及时处理 所以设置个软限制
+     * 判断数据比这个软限制大的就拆分
+     */
     inline constexpr std::uint32_t kChunkBytes = 1u << 20;
 
-    // 消息类型 包含了控制端口和数据端口的所有消息
-    enum class MessageType : std::uint8_t {
-        Hello = 1,
-        HelloAck = 2,
-        // 控制端口 worker告诉master自己等待任务
-        RequestTask = 3,
-        // master向worker派发任务
-        Task = 4,
-        InputRequest = 5,
-        Data = 6,
-        MapOutput = 7,
-        Fetch = 8,
-        Result = 9,
-        Done = 10,
-        Fail = 11,
-        Ping = 12,
-        Pong = 13,
-        Stop = 14,
-        Shutdown = 15,
-        // client向master提交任务
-        Submit = 16,
-        SubmitAck = 17,
-        SubmitResult = 18,
-        Pull = 19,
-        DataAddress = 20,
-        Plugin = 21,
-        // worker加载插件的结果
-        PluginAck = 22,
-        // 数据端口 worker跟master要map阶段的input
-        PullInput = 23,
-        // 数据端口 worker跟master要插件
-        PullPlugin = 24,
-        MasterData = 25,
-        NeedPlugin = 26,
-        InputBlob = 27,
-        Progress = 28,
-        Cancel = 29,
+    // 通信消息的种类
+    enum class MessageCategory : std::uint8_t {
+        // 生命周期类
+        Lifecycle = 1,
+        // 控制面任务调度
+        JobControl = 2,
+        // 数据面 Job插件/map输入/map中间结果
+        Data = 3,
+        // 作业提交与状态
+        JobSubmit = 4,
+        // Block上传与副本管理
+        Dfs = 5,
     };
+
+    /// @param category 消息的种类
+    /// @param code 消息的code
+    /// @return 消息枚举类型编码 8bit=[高4位种类, 低4位类型]
+    constexpr std::uint8_t msgType(MessageCategory category, std::uint8_t code) {
+        return static_cast<std::uint8_t>((static_cast<std::uint8_t>(category) << 4) | (code & 0x0F));
+    }
+
+    // 消息编码
+    enum class MessageType : std::uint8_t {
+        // worker跟master建立连接
+        Hello = msgType(MessageCategory::Lifecycle, 1),
+        // 心跳
+        Ping = msgType(MessageCategory::Lifecycle, 2),
+        Pong = msgType(MessageCategory::Lifecycle, 3),
+        // master关机通知client/worker
+        Shutdown = msgType(MessageCategory::Lifecycle, 4),
+        // worker把自己的数据面监听端口报给master
+        DataAddress = msgType(MessageCategory::Lifecycle, 5),
+        // master的数据端口信息 master告诉worker自己端口是哪个
+        MasterData = msgType(MessageCategory::Lifecycle, 6),
+
+        // worker告诉master自己在等待任务
+        RequestTask = msgType(MessageCategory::JobControl, 1),
+        // master向worker派发任务
+        TaskAssignment = msgType(MessageCategory::JobControl, 2),
+        // 任务成功
+        Done = msgType(MessageCategory::JobControl, 3),
+        // 任务失败
+        Fail = msgType(MessageCategory::JobControl, 4),
+        // job的进度报告
+        Progress = msgType(MessageCategory::JobControl, 5),
+        // master让worker取消某个重复attempt
+        Cancel = msgType(MessageCategory::JobControl, 6),
+        // master告诉worker去拉插件
+        FetchPlugin = msgType(MessageCategory::JobControl, 7),
+        // master通知job结束了
+        JobFinished = msgType(MessageCategory::JobControl, 8),
+
+        // 配Flag::More 通用大blob流式分块
+        Chunk = msgType(MessageCategory::Data, 1),
+        // reduce结果
+        ReduceResult = msgType(MessageCategory::Data, 2),
+        // worker间拉某个map任务的分区 worker执行reduce阶段的时候只去别的worker节点拉需要分区的数据
+        Pull = msgType(MessageCategory::Data, 3),
+        Plugin = msgType(MessageCategory::Data, 4),
+        // worker加载插件的结果
+        PluginAck = msgType(MessageCategory::Data, 5),
+        // worker跟master要map阶段的input
+        PullInput = msgType(MessageCategory::Data, 6),
+        // worker跟master要插件
+        PullPlugin = msgType(MessageCategory::Data, 7),
+
+        // 提交job
+        Submit = msgType(MessageCategory::JobSubmit, 1),
+        // 受理job
+        SubmitAck = msgType(MessageCategory::JobSubmit, 2),
+        // job的最终结果
+        SubmitResult = msgType(MessageCategory::JobSubmit, 3),
+
+        // client把切好的block清单报给master 请master分配副本位置
+        BlockManifest = msgType(MessageCategory::Dfs, 1),
+        // master把每个block的副本位置回给client
+        BlockPlacement = msgType(MessageCategory::Dfs, 2),
+        // client把block都写完的通知
+        UploadDone = msgType(MessageCategory::Dfs, 3),
+        // master让worker从别的副本复制一个block过来
+        ReplicateBlock = msgType(MessageCategory::Dfs, 4),
+        // worker上报自己本地持有的block清单
+        BlockReport = msgType(MessageCategory::Dfs, 5),
+        // master让worker删掉某个不再需要的block
+        DeleteBlock = msgType(MessageCategory::Dfs, 6),
+    };
+
+    /// @param type 消息编码
+    /// @return 消息编码属于哪种种类
+    constexpr MessageCategory categoryOf(MessageType type) {
+        return static_cast<MessageCategory>(static_cast<std::uint8_t>(type) >> 4);
+    }
+
+    /// @return 消息编码对应的值 低4位
+    constexpr std::uint8_t messageCode(MessageType type) {
+        return static_cast<std::uint8_t>(type) & 0x0F;
+    }
 
     enum class WireType : std::uint8_t {
         Varint = 0,
@@ -95,7 +158,7 @@ namespace xmr::protocol {
 
     /**
      * 消息头 协议=协议头(传递的时候把协议头编码成16字节)+body
-     * 
+     *
      * 协议头的布局
      * | offset | size | field | 说明 |
      * |-------:|-----:|-------|------|
@@ -138,20 +201,18 @@ namespace xmr::protocol {
      */
     Header decodeHeader(const std::uint8_t* data, std::size_t size);
 
-    /**
-     * 编码协议帧
-     * @param header 消息header
-     * @param payload 消息body
-     */
+    /// @brief 协议头+消息体 拼成帧字节流
+    /// @param header 协议头
+    /// @param payload 消息体
     std::vector<std::uint8_t> encodeFrame(const Header& header, const std::vector<std::uint8_t>& payload);
 
-    /// @brief 消息编码
-    /// @param type 消息类型 
-    /// @param requestId 请求/响应的关联 
+    /// @brief 逻辑消息转换成TCP帧字节流
+    /// @param type 消息类型
+    /// @param requestId 请求/响应的关联 0-表示单向消息
     /// @param body 消息内容
     /// @param flags 放在协议头里面
-    /// @return 
-    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId, const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
+    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId,
+                                        const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
 
     void appendVarint(std::vector<std::uint8_t>& out, std::uint64_t value);
 
@@ -222,15 +283,7 @@ namespace xmr::protocol {
         inline constexpr std::uint16_t kWorkerId = 2;
         inline constexpr std::uint16_t kCapabilities = 3;
         inline constexpr std::uint16_t kPid = 4;
-    } // namespace hello
-
-    namespace helloAck {
-        inline constexpr std::uint16_t kProtocolVersion = 1;
-        inline constexpr std::uint16_t kSessionId = 2;
-        inline constexpr std::uint16_t kCapabilities = 3;
-        inline constexpr std::uint16_t kStatusCode = 4;
-        inline constexpr std::uint16_t kReason = 5;
-    } // namespace helloAck
+    }  // namespace hello
 
     namespace taskMsg {
         inline constexpr std::uint16_t kKind = 1;
@@ -241,56 +294,41 @@ namespace xmr::protocol {
         inline constexpr std::uint16_t kInput = 6;
         // 重复字段 每个是"mapTask,host,port" reduce去这些worker拉中间结果
         inline constexpr std::uint16_t kLocation = 7;
-    } // namespace taskMsg
-
-    namespace inputRequest {
-        inline constexpr std::uint16_t kTaskId = 1;
-    } // namespace inputRequest
+        // 重复字段 每个是"blockId,host,port" map任务去这些位置读输入block
+        inline constexpr std::uint16_t kBlock = 8;
+    }  // namespace taskMsg
 
     namespace data {
         inline constexpr std::uint16_t kOffset = 1;
         inline constexpr std::uint16_t kTotal = 2;
         inline constexpr std::uint16_t kPayload = 3;
-    } // namespace data
-
-    namespace mapOutput {
-        inline constexpr std::uint16_t kMapTask = 1;
-        inline constexpr std::uint16_t kPartition = 2;
-        inline constexpr std::uint16_t kOffset = 3;
-        inline constexpr std::uint16_t kPayload = 4;
-    } // namespace mapOutput
-
-    namespace fetch {
-        inline constexpr std::uint16_t kMapTask = 1;
-        inline constexpr std::uint16_t kPartition = 2;
-        inline constexpr std::uint16_t kOffset = 3;
-    } // namespace fetch
+    }  // namespace data
 
     namespace resultMsg {
         inline constexpr std::uint16_t kReduceTask = 1;
         inline constexpr std::uint16_t kOffset = 2;
         inline constexpr std::uint16_t kPayload = 3;
-    } // namespace resultMsg
+    }  // namespace resultMsg
 
     namespace done {
         inline constexpr std::uint16_t kKind = 1;
         inline constexpr std::uint16_t kTaskId = 2;
-    } // namespace done
+    }  // namespace done
 
     namespace fail {
         inline constexpr std::uint16_t kKind = 1;
         inline constexpr std::uint16_t kTaskId = 2;
         inline constexpr std::uint16_t kStatusCode = 3;
         inline constexpr std::uint16_t kReason = 4;
-    } // namespace fail
+    }  // namespace fail
 
     namespace ping {
         inline constexpr std::uint16_t kNonce = 1;
-    } // namespace ping
+    }  // namespace ping
 
     namespace stop {
         inline constexpr std::uint16_t kReason = 1;
-    } // namespace stop
+    }  // namespace stop
 
     namespace submit {
         inline constexpr std::uint16_t kJob = 1;
@@ -298,77 +336,100 @@ namespace xmr::protocol {
         inline constexpr std::uint16_t kOutput = 4;
         inline constexpr std::uint16_t kInput = 5;
         inline constexpr std::uint16_t kPluginHash = 6;
-    } // namespace submit
+    }  // namespace submit
 
     namespace submitAck {
         inline constexpr std::uint16_t kStatusCode = 1;
         inline constexpr std::uint16_t kReason = 2;
         inline constexpr std::uint16_t kDataHost = 3;
         inline constexpr std::uint16_t kDataPort = 4;
-    } // namespace submitAck
+    }  // namespace submitAck
 
     namespace submitResult {
         inline constexpr std::uint16_t kStatusCode = 1;
         inline constexpr std::uint16_t kOutput = 2;
         inline constexpr std::uint16_t kReason = 3;
-    } // namespace submitResult
+    }  // namespace submitResult
 
     namespace pull {
         inline constexpr std::uint16_t kMapTask = 1;
         inline constexpr std::uint16_t kPartition = 2;
-    } // namespace pull
+    }  // namespace pull
 
     namespace dataAddress {
         inline constexpr std::uint16_t kPort = 1;
-    } // namespace dataAddress
+        inline constexpr std::uint16_t kBlockPort = 2;
+    }  // namespace dataAddress
 
     namespace plugin {
         inline constexpr std::uint16_t kHash = 1;
         inline constexpr std::uint16_t kJob = 2;
         inline constexpr std::uint16_t kOffset = 3;
         inline constexpr std::uint16_t kPayload = 4;
-    } // namespace plugin
+    }  // namespace plugin
 
     namespace pluginAck {
         inline constexpr std::uint16_t kHash = 1;
         inline constexpr std::uint16_t kOk = 2;
         inline constexpr std::uint16_t kReason = 3;
-    } // namespace pluginAck
+    }  // namespace pluginAck
 
     namespace pullInput {
         inline constexpr std::uint16_t kTaskId = 1;
-    } // namespace pullInput
+    }  // namespace pullInput
 
     namespace pullPlugin {
         inline constexpr std::uint16_t kHash = 1;
-    } // namespace pullPlugin
+    }  // namespace pullPlugin
 
     namespace masterData {
         inline constexpr std::uint16_t kPort = 1;
-    } // namespace masterData
+    }  // namespace masterData
 
     namespace needPlugin {
         inline constexpr std::uint16_t kHash = 1;
         inline constexpr std::uint16_t kJob = 2;
-    } // namespace needPlugin
-
-    namespace inputBlob {
-        inline constexpr std::uint16_t kIndex = 1;
-        inline constexpr std::uint16_t kOffset = 2;
-        inline constexpr std::uint16_t kPayload = 3;
-    } // namespace inputBlob
+    }  // namespace needPlugin
 
     namespace progress {
         inline constexpr std::uint16_t kKind = 1;
         inline constexpr std::uint16_t kTaskId = 2;
         inline constexpr std::uint16_t kFraction = 3;
-    } // namespace progress
+    }  // namespace progress
 
     namespace cancel {
         inline constexpr std::uint16_t kKind = 1;
         inline constexpr std::uint16_t kTaskId = 2;
-    } // namespace cancel
+    }  // namespace cancel
+
+    namespace blockManifest {
+        inline constexpr std::uint16_t kBlock = 1;
+    }  // namespace blockManifest
+
+    namespace blockPlacement {
+        inline constexpr std::uint16_t kStatusCode = 1;
+        inline constexpr std::uint16_t kReason = 2;
+        inline constexpr std::uint16_t kReplica = 3;
+    }  // namespace blockPlacement
+
+    namespace uploadDone {
+        inline constexpr std::uint16_t kJob = 1;
+    }  // namespace uploadDone
+
+    namespace replicateBlock {
+        inline constexpr std::uint16_t kBlockId = 1;
+        inline constexpr std::uint16_t kSourceHost = 2;
+        inline constexpr std::uint16_t kSourcePort = 3;
+    }  // namespace replicateBlock
+
+    namespace blockReport {
+        inline constexpr std::uint16_t kBlock = 1;
+    }  // namespace blockReport
+
+    namespace deleteBlock {
+        inline constexpr std::uint16_t kBlockId = 1;
+    }  // namespace deleteBlock
 
     // 内容哈希(FNV-1a 64) 十六进制 用作插件的缓存key
     std::string contentHash(const std::vector<std::uint8_t>& data);
-} // namespace xmr::protocol
+}  // namespace xmr::protocol

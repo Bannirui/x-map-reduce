@@ -83,13 +83,47 @@ TODO
     - [X] 模拟Netty的EventLoop线程模型
     - [X] boss负责accept连接
     - [X] work负责业务
-~~- [ ] V9 存储层(类HDFS) + 数据本地性调度~~
-  - [ ] worker本地块存储 block store：blockId -> 本地文件，数据面提供存取block的接口
-  - [ ] client上传输入时master切成block并按副本策略分配到worker；master只记 block -> [worker] locator
-  - [ ] Task.input 变成 block locator(blockId + 候选worker)，不再是整块字节/路径
-  - [ ] 数据本地性调度：master优先把map派给持有该block的worker，缺本地时退回任意worker(走数据面拉block)
-  - [ ] 副本+恢复：block多副本，节点挂后读其它副本并重复制
-  - [ ] 说明：这是HDFS的NameNode/DataNode + locality思路；shuffle仍可走worker↔worker P2P(论文/Hadoop都如此)
+- [X] V9 存储层(类GFS) + 数据本地性调度
+  - 目标：DFS从一开始就按「可整体拆出去的独立库」设计，只依赖 std/net，绝不依赖 mapreduce/runtime/protocol，将来能原样 subtree split
+  - [x] V9.0 独立 x-dfs 库 + BlockStore
+    - [x] 库边界：独立 target `x-dfs`(include/dfs/)，只依赖 std/net
+    - [x] BlockStore：blockId -> 本地文件，原子写/读/删/列/大小/内容校验，纯磁盘无网络，可独立单测
+    - [x] 块传输协议：dfs自带消息目录(XDFS)，复用 xnet 通用 codec，不复用 xmr::protocol::MessageType
+    - [x] BlockServer(DataNode)/BlockClient：分块 WriteBlock/ReadBlock，单测(分块/缺失/空块/覆盖)
+  - [x] V9.1 worker接入 BlockServer + --data-dir，DataAddress上报block端口，数据面提供存取block接口
+      - master记录 workerBlock_(仅登记,暂不使用)，旧输入路径不变
+  - [x] V9.2 client切block→master分配副本→client直连各worker写BlockServer→master只记block->[worker] locator
+      - BlockManifest/BlockPlacement/UploadDone消息；client按内容哈希命名block，副本数min(3,worker数)
+      - 过渡态：client仍走旧路径把字节传master(供map用)，V9.3切换读block后删掉
+  - [x] V9.3 Task携带block locator，worker本地/对端读block，master不再存输入字节(去掉InputBlob/PullInput)
+      - TaskMessage新增blocks字段(每项blockId,host,port,同block副本连续)；worker readBlocks先本地后对端
+      - master收到UploadDone才开跑；client不再上传输入字节，只上传插件
+  - [x] V9.4 数据本地性调度：master优先把map派给持有该block的worker(holds最多者优先)，缺本地退回任意worker
+      - WorkerRegistry新增assignTo/isIdle；master.assignLocal按blockPlan_匹配空闲持有者
+  - [x] V9.5 副本+恢复：BlockReport上报块清单重建locator；worker挂掉丢locator并从存活副本重复制(ReplicateBlock)
+      - worker读不到本地走其它副本(V9.3已具备)
+  - [x] V9.6 加固
+      - [x] BlockStore每组块checksum(写8字节头,读时校验,损坏返回空)
+      - [x] job结束GC：master发DeleteBlock给持有者删除本次job的block
+      - [x] worker周期性BlockReport(5s)
+      - [x] master断连检测修复：xnet的ByteToMessageDecoder不转发channelInactive，master pipeline最前面加ConnectionLifecycleHandler
+      - [x] failure_test：worker中途挂掉后下一次job仍能跑通
+  - 说明(仅文档,不实现)：lease/primary一致性、HA/元数据checkpoint、机架感知、rebalance 暂不做
+  - [ ] 说明：这是GFS的NameNode/DataNode + locality思路；shuffle仍可走worker↔worker P2P(论文/Hadoop都如此)
+- [ ] V10 文件式DFS：数据常驻DFS，client按DFS路径提交(暂不做，先消化现有dfs代码)
+  - 目标：提交job只报DFS路径；master查命名空间→map split；client零上传且只需连master(顺带解决client跨机/跨集群)
+  - 前提：数据已通过 dfs put 入库，文件/块常驻，不随job结束GC
+  - 最小可用版(不落盘)
+    - [ ] master内存命名空间 path -> [blockId]，locator复用 workerBlocks_
+    - [ ] 抽独立 dfs put：切块→BlockManifest/BlockPlacement→直写→CommitFile{path,blocks}
+    - [ ] Submit.inputs 语义改为DFS路径；master查命名空间→buildMapBlocks；去掉提交时的manifest/placement等待与 uploadDone_ 门控
+  - 完整版
+    - [ ] 命名空间持久化+重启恢复(同时补上缺的元数据checkpoint)；locator靠worker BlockReport回填
+    - [ ] GC语义改：块属于文件，job结束不删；dfs rm 引用计数到0才真删
+    - [ ] output闭环：job输出也 CommitFile 回DFS
+    - [ ] dfs ls / stat / rm 接口(client可查询dfs)
+  - 说明：比数据库/表层更基础；worker readBlocks 路径完全不变；dfs库几乎不动，主战场在master
+- [ ] 备选(在V10之上)：DFS上叠数据库/表层：表名->文件/块 + schema + 查询层(SQL→MR)；catalog独立于dfs库
 - [X] master角色任务过重 拆分问题
   - [X] worker管理
   - [X] 任务调度

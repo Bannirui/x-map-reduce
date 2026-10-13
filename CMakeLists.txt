@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 输出目录
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -21,11 +22,14 @@ add_asset_copy_target("${CMAKE_SOURCE_DIR}/asset")
 
 include(CTest)
 
-include(${CMAKE_SOURCE_DIR}/cmake/xnet.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/x-net.cmake)
 
 add_subdirectory(mapreduce)
 add_subdirectory(protocol)
+add_subdirectory(handler)
+add_subdirectory(dfs)
 add_subdirectory(runtime)
+add_subdirectory(worker)
 add_subdirectory(jobs)
 add_subdirectory(client)
 add_subdirectory(server)

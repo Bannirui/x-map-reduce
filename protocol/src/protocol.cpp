@@ -1,6 +1,6 @@
-#include"protocol/protocol.h"
+#include "protocol/protocol.h"
 
-#include<algorithm>
+#include <algorithm>
 
 namespace xmr::protocol {
     namespace {
@@ -37,10 +37,8 @@ namespace xmr::protocol {
          * @param 网络上传过来的数据 大端序
          */
         std::uint32_t readBE32(const std::uint8_t* data) {
-            return (static_cast<std::uint32_t>(data[0]) << 24)
-                   | (static_cast<std::uint32_t>(data[1]) << 16)
-                   | (static_cast<std::uint32_t>(data[2]) << 8)
-                   | static_cast<std::uint32_t>(data[3]);
+            return (static_cast<std::uint32_t>(data[0]) << 24) | (static_cast<std::uint32_t>(data[1]) << 16) |
+                   (static_cast<std::uint32_t>(data[2]) << 8) | static_cast<std::uint32_t>(data[3]);
         }
 
         /**
@@ -88,7 +86,7 @@ namespace xmr::protocol {
             }
             throw ProtocolError("truncated varint");
         }
-    } // namespace
+    }  // namespace
 
     std::array<std::uint8_t, kHeaderSize> encodeHeader(const Header& header) {
         // 消息大小别超
@@ -152,7 +150,8 @@ namespace xmr::protocol {
         return frame;
     }
 
-    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId, const std::vector<std::uint8_t>& body, std::uint16_t flags) {
+    std::vector<std::uint8_t> makeFrame(MessageType type, std::uint32_t requestId,
+                                        const std::vector<std::uint8_t>& body, std::uint16_t flags) {
         Header header;
         header.type = type;
         header.flags = flags;
@@ -183,42 +182,74 @@ namespace xmr::protocol {
         return out;
     }
 
-    std::string_view messageTypeName(MessageType type) {        switch (type) {
-            case MessageType::Hello: return "HELLO";
-            case MessageType::HelloAck: return "HELLO_ACK";
-            case MessageType::RequestTask: return "REQUEST_TASK";
-            case MessageType::Task: return "TASK";
-            case MessageType::InputRequest: return "INPUT_REQUEST";
-            case MessageType::Data: return "DATA";
-            case MessageType::MapOutput: return "MAP_OUTPUT";
-            case MessageType::Fetch: return "FETCH";
-            case MessageType::Result: return "RESULT";
-            case MessageType::Done: return "DONE";
-            case MessageType::Fail: return "FAIL";
-            case MessageType::Ping: return "PING";
-            case MessageType::Pong: return "PONG";
-            case MessageType::Stop: return "STOP";
-            case MessageType::Shutdown: return "SHUTDOWN";
-            case MessageType::Submit: return "SUBMIT";
-            case MessageType::SubmitAck: return "SUBMIT_ACK";
-            case MessageType::SubmitResult: return "SUBMIT_RESULT";
-            case MessageType::Pull: return "PULL";
-            case MessageType::DataAddress: return "DATA_ADDRESS";
-            case MessageType::Plugin: return "PLUGIN";
-            case MessageType::PluginAck: return "PLUGIN_ACK";
-            case MessageType::PullInput: return "PULL_INPUT";
-            case MessageType::PullPlugin: return "PULL_PLUGIN";
-            case MessageType::MasterData: return "MASTER_DATA";
-            case MessageType::NeedPlugin: return "NEED_PLUGIN";
-            case MessageType::InputBlob: return "INPUT_BLOB";
-            case MessageType::Progress: return "PROGRESS";
-            case MessageType::Cancel: return "CANCEL";
+    std::string_view messageTypeName(MessageType type) {
+        switch (type) {
+            case MessageType::Hello:
+                return "HELLO";
+            case MessageType::RequestTask:
+                return "REQUEST_TASK";
+            case MessageType::TaskAssignment:
+                return "TASK_ASSIGNMENT";
+            case MessageType::Chunk:
+                return "CHUNK";
+            case MessageType::ReduceResult:
+                return "REDUCE_RESULT";
+            case MessageType::Done:
+                return "DONE";
+            case MessageType::Fail:
+                return "FAIL";
+            case MessageType::Ping:
+                return "PING";
+            case MessageType::Pong:
+                return "PONG";
+            case MessageType::JobFinished:
+                return "JOB_FINISHED";
+            case MessageType::Shutdown:
+                return "SHUTDOWN";
+            case MessageType::Submit:
+                return "SUBMIT";
+            case MessageType::SubmitAck:
+                return "SUBMIT_ACK";
+            case MessageType::SubmitResult:
+                return "SUBMIT_RESULT";
+            case MessageType::Pull:
+                return "PULL";
+            case MessageType::DataAddress:
+                return "DATA_ADDRESS";
+            case MessageType::Plugin:
+                return "PLUGIN";
+            case MessageType::PluginAck:
+                return "PLUGIN_ACK";
+            case MessageType::PullInput:
+                return "PULL_INPUT";
+            case MessageType::PullPlugin:
+                return "PULL_PLUGIN";
+            case MessageType::MasterData:
+                return "MASTER_DATA";
+            case MessageType::FetchPlugin:
+                return "FETCH_PLUGIN";
+            case MessageType::Progress:
+                return "PROGRESS";
+            case MessageType::Cancel:
+                return "CANCEL";
+            case MessageType::BlockManifest:
+                return "BLOCK_MANIFEST";
+            case MessageType::BlockPlacement:
+                return "BLOCK_PLACEMENT";
+            case MessageType::UploadDone:
+                return "UPLOAD_DONE";
+            case MessageType::ReplicateBlock:
+                return "REPLICATE_BLOCK";
+            case MessageType::BlockReport:
+                return "BLOCK_REPORT";
+            case MessageType::DeleteBlock:
+                return "DELETE_BLOCK";
         }
         return "UNKNOWN";
     }
 
     std::optional<MessageType> parseMessageType(std::string_view name) {
-        for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::Cancel); ++raw) {
+        for (unsigned raw = 0; raw <= 0xFF; ++raw) {
             const auto type = static_cast<MessageType>(raw);
             if (messageTypeName(type) == name) {
                 return type;
@@ -254,13 +285,9 @@ namespace xmr::protocol {
         putField(id, WireType::Bytes, value.data(), value.size());
     }
 
-    FieldReader::FieldReader(const std::vector<std::uint8_t>& data)
-        : data_(data.data()), size_(data.size()) {
-    }
+    FieldReader::FieldReader(const std::vector<std::uint8_t>& data) : data_(data.data()), size_(data.size()) {}
 
-    FieldReader::FieldReader(const std::uint8_t* data, std::size_t size)
-        : data_(data), size_(size) {
-    }
+    FieldReader::FieldReader(const std::uint8_t* data, std::size_t size) : data_(data), size_(size) {}
 
     bool FieldReader::next() {
         if (offset_ >= size_) {
@@ -314,4 +341,4 @@ namespace xmr::protocol {
         }
         return std::vector<std::uint8_t>(value_, value_ + valueSize_);
     }
-} // namespace xmr::protocol
+}  // namespace xmr::protocol

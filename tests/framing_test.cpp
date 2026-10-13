@@ -50,7 +50,7 @@ std::vector<std::uint8_t> rawHeader(const std::uint8_t magic[4], std::uint32_t p
         header[i] = magic[i];
     }
     header[4] = xmr::protocol::kVersion;
-    header[5] = static_cast<std::uint8_t>(xmr::protocol::MessageType::Task);
+    header[5] = static_cast<std::uint8_t>(xmr::protocol::MessageType::TaskAssignment);
     header[12] = static_cast<std::uint8_t>(payloadLen >> 24);
     header[13] = static_cast<std::uint8_t>(payloadLen >> 16);
     header[14] = static_cast<std::uint8_t>(payloadLen >> 8);

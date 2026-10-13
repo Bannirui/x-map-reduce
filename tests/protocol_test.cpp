@@ -42,7 +42,7 @@ std::vector<std::uint8_t> rawHeader(std::uint32_t payloadLen) {
         header[i] = magic[i];
     }
     header[4] = xmr::protocol::kVersion;
-    header[5] = static_cast<std::uint8_t>(xmr::protocol::MessageType::Task);
+    header[5] = static_cast<std::uint8_t>(xmr::protocol::MessageType::TaskAssignment);
     writeBE32(header.data() + 12, payloadLen);
     return header;
 }
@@ -56,7 +56,7 @@ int main() {
         {
             Header header;
             header.version = kVersion;
-            header.type = MessageType::Task;
+            header.type = MessageType::TaskAssignment;
             header.flags = static_cast<std::uint16_t>(Flag::More);
             header.requestId = 0x01020304u;
             header.payloadLen = 5;
@@ -65,7 +65,7 @@ int main() {
             check(bytes[0] == 'X' && bytes[1] == 'M' && bytes[2] == 'R' && bytes[3] == 'P',
                   "magic should be XMRP");
             check(bytes[4] == kVersion, "version byte");
-            check(bytes[5] == static_cast<std::uint8_t>(MessageType::Task), "type byte");
+            check(bytes[5] == static_cast<std::uint8_t>(MessageType::TaskAssignment), "type byte");
             check(bytes[6] == 0 && bytes[7] == 1, "flags should be big-endian");
             check(bytes[8] == 0x01 && bytes[9] == 0x02 && bytes[10] == 0x03 && bytes[11] == 0x04,
                   "requestId should be big-endian");
@@ -74,7 +74,7 @@ int main() {
 
             const Header decoded = decodeHeader(bytes.data(), bytes.size());
             check(decoded.version == kVersion, "decoded version");
-            check(decoded.type == MessageType::Task, "decoded type");
+            check(decoded.type == MessageType::TaskAssignment, "decoded type");
             check(decoded.flags == static_cast<std::uint16_t>(Flag::More), "decoded flags");
             check(decoded.requestId == 0x01020304u, "decoded requestId");
             check(decoded.payloadLen == 5, "decoded payloadLen");
@@ -100,7 +100,7 @@ int main() {
 
         {
             Header header;
-            header.type = MessageType::Data;
+            header.type = MessageType::Chunk;
             header.requestId = 7;
             const std::vector<std::uint8_t> payload{1, 2, 3, 4};
             const auto frame = encodeFrame(header, payload);
@@ -192,9 +192,13 @@ int main() {
         }
 
         {
-            for (std::uint8_t raw = 1; raw <= static_cast<std::uint8_t>(MessageType::Stop); ++raw) {
+            for (unsigned raw = 0; raw <= 0xFF; ++raw) {
                 const auto type = static_cast<MessageType>(raw);
-                const auto parsed = parseMessageType(messageTypeName(type));
+                const auto name = messageTypeName(type);
+                if (name == "UNKNOWN") {
+                    continue;
+                }
+                const auto parsed = parseMessageType(name);
                 check(parsed.has_value() && *parsed == type, "message type name should round-trip");
             }
             check(!parseMessageType("NOPE").has_value(), "unknown message type should not parse");
@@ -203,7 +207,7 @@ int main() {
         {
             const std::vector<std::uint8_t> empty;
             Header header;
-            header.type = MessageType::Stop;
+            header.type = MessageType::JobFinished;
             const auto frame = encodeFrame(header, empty);
             check(frame.size() == kHeaderSize, "empty payload frame should be just the header");
             check(decodeHeader(frame.data(), frame.size()).payloadLen == 0, "empty payload length");

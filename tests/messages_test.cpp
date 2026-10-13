@@ -58,32 +58,19 @@ int main() {
         }
 
         {
-            HelloAck ack;
-            ack.protocolVersion = kVersion;
-            ack.sessionId = "sess-1";
-            ack.capabilities = 0;
-            ack.statusCode = StatusCode::UnsupportedVersion;
-            ack.reason = "too new";
-            const auto decoded = HelloAck::decode(ack.encode());
-            check(decoded.sessionId == "sess-1", "hello_ack sessionId");
-            check(decoded.statusCode == StatusCode::UnsupportedVersion, "hello_ack status");
-            check(decoded.reason == "too new", "hello_ack reason");
-        }
-
-        {
             RequestTask request;
             check(RequestTask::decode(request.encode()).encode().empty(), "request_task is empty");
         }
 
         {
-            TaskMessage task;
+            TaskAssignment task;
             task.kind = WorkKind::Map;
             task.taskId = 3;
             task.job = "word_count";
             task.reducers = 4;
             task.maps = 9;
             task.input = "asset/wordCount1.txt";
-            const auto decoded = TaskMessage::decode(task.encode());
+            const auto decoded = TaskAssignment::decode(task.encode());
             check(decoded.kind == WorkKind::Map, "task kind");
             check(decoded.taskId == 3, "task id");
             check(decoded.job == "word_count", "task job");
@@ -91,66 +78,40 @@ int main() {
             check(decoded.maps == 9, "task maps");
             check(decoded.input.has_value() && *decoded.input == "asset/wordCount1.txt", "task input");
 
-            TaskMessage reduce;
+            TaskAssignment reduce;
             reduce.kind = WorkKind::Reduce;
             reduce.taskId = 2;
             reduce.job = "word_count";
             reduce.reducers = 4;
             reduce.maps = 9;
-            const auto decodedReduce = TaskMessage::decode(reduce.encode());
+            const auto decodedReduce = TaskAssignment::decode(reduce.encode());
             check(decodedReduce.kind == WorkKind::Reduce, "reduce kind");
             check(!decodedReduce.input.has_value(), "reduce has no input");
         }
 
         {
-            InputRequest request;
-            request.taskId = 11;
-            check(InputRequest::decode(request.encode()).taskId == 11, "input_request taskId");
-        }
-
-        {
-            DataMessage data;
+            Chunk data;
             data.offset = 1024;
             data.total = 8192;
             data.payload = std::vector<std::uint8_t>{0, 1, 2, 253, 254, 255};
-            const auto decoded = DataMessage::decode(data.encode());
+            const auto decoded = Chunk::decode(data.encode());
             check(decoded.offset == 1024, "data offset");
             check(decoded.total.has_value() && *decoded.total == 8192, "data total");
             check(decoded.payload == data.payload, "data payload");
 
-            DataMessage noTotal;
+            Chunk noTotal;
             noTotal.payload = {9, 8, 7};
-            const auto decodedNoTotal = DataMessage::decode(noTotal.encode());
+            const auto decodedNoTotal = Chunk::decode(noTotal.encode());
             check(!decodedNoTotal.total.has_value(), "data without total");
             check(decodedNoTotal.payload == noTotal.payload, "data payload without total");
         }
 
         {
-            MapOutput output;
-            output.mapTask = 1;
-            output.partition = 2;
-            output.offset = 0;
-            output.payload = {'k', '\t', 'v', '\n', '\0'};
-            const auto decoded = MapOutput::decode(output.encode());
-            check(decoded.mapTask == 1 && decoded.partition == 2, "map_output ids");
-            check(decoded.payload == output.payload, "map_output binary-safe payload");
-        }
-
-        {
-            Fetch fetch;
-            fetch.mapTask = 5;
-            fetch.partition = 6;
-            fetch.offset = 128;
-            const auto decoded = Fetch::decode(fetch.encode());
-            check(decoded.mapTask == 5 && decoded.partition == 6 && decoded.offset == 128, "fetch fields");
-        }
-
-        {
-            ResultMessage result;
+            ReduceResult result;
             result.reduceTask = 0;
             result.offset = 64;
             result.payload = {1, 2, 3};
-            const auto decoded = ResultMessage::decode(result.encode());
+            const auto decoded = ReduceResult::decode(result.encode());
             check(decoded.reduceTask == 0 && decoded.offset == 64, "result ids");
             check(decoded.payload == result.payload, "result payload");
         }
@@ -183,9 +144,9 @@ int main() {
             pong.nonce = 99;
             check(Pong::decode(pong.encode()).nonce == 99, "pong nonce");
 
-            Stop stop;
+            JobFinished stop;
             stop.reason = "job finished";
-            check(Stop::decode(stop.encode()).reason == "job finished", "stop reason");
+            check(JobFinished::decode(stop.encode()).reason == "job finished", "stop reason");
         }
 
         {
@@ -220,7 +181,7 @@ int main() {
             writer.putString(taskMsg::kJob, "word_count");
             writer.putU64(taskMsg::kReducers, 1);
             writer.putU64(taskMsg::kMaps, 1);
-            check(throwsProtocol([&] { TaskMessage::decode(writer.take()); }),
+            check(throwsProtocol([&] { TaskAssignment::decode(writer.take()); }),
                   "out-of-range work kind should throw");
         }
 
@@ -231,7 +192,7 @@ int main() {
             writer.putString(taskMsg::kJob, "word_count");
             writer.putU64(taskMsg::kReducers, 1);
             writer.putU64(taskMsg::kMaps, 1);
-            check(throwsProtocol([&] { TaskMessage::decode(writer.take()); }),
+            check(throwsProtocol([&] { TaskAssignment::decode(writer.take()); }),
                   "unset work kind should throw");
         }
 
@@ -242,16 +203,60 @@ int main() {
             writer.putString(taskMsg::kJob, "word_count");
             writer.putU64(taskMsg::kReducers, 1);
             writer.putU64(taskMsg::kMaps, 1);
-            check(throwsProtocol([&] { TaskMessage::decode(writer.take()); }),
+            check(throwsProtocol([&] { TaskAssignment::decode(writer.take()); }),
                   "map task without input should throw");
         }
 
         {
-            FieldWriter writer;
-            writer.putU64(helloAck::kProtocolVersion, kVersion);
-            writer.putU64(helloAck::kStatusCode, 99);
-            check(throwsProtocol([&] { HelloAck::decode(writer.take()); }),
-                  "out-of-range status code should throw");
+            DataAddress address;
+            address.port = 9331;
+            address.blockPort = 9332;
+            const auto decoded = DataAddress::decode(address.encode());
+            check(decoded.port == 9331, "data_address port");
+            check(decoded.blockPort == 9332, "data_address block port");
+
+            DataAddress legacy;
+            legacy.port = 9331;
+            const auto decodedLegacy = DataAddress::decode(legacy.encode());
+            check(decodedLegacy.blockPort == 0, "data_address block port defaults to 0");
+        }
+
+        {
+            BlockManifest manifest;
+            manifest.blocks = {"0,0,abc,5", "1,0,def,7"};
+            const auto decoded = BlockManifest::decode(manifest.encode());
+            check(decoded.blocks.size() == 2, "block_manifest count");
+            check(decoded.blocks[0] == "0,0,abc,5", "block_manifest first entry");
+
+            BlockPlacement placement;
+            placement.statusCode = StatusCode::Ok;
+            placement.replicas = {"abc,127.0.0.1,9332", "def,127.0.0.1,9333"};
+            const auto decodedPlacement = BlockPlacement::decode(placement.encode());
+            check(decodedPlacement.statusCode == StatusCode::Ok, "block_placement status");
+            check(decodedPlacement.replicas.size() == 2
+                  && decodedPlacement.replicas[1] == "def,127.0.0.1,9333", "block_placement replicas");
+
+            UploadDone done;
+            done.job = "word_count";
+            check(UploadDone::decode(done.encode()).job == "word_count", "upload_done job");
+
+            ReplicateBlock replicate;
+            replicate.blockId = "abc";
+            replicate.sourceHost = "127.0.0.1";
+            replicate.sourcePort = 9332;
+            const auto decodedReplicate = ReplicateBlock::decode(replicate.encode());
+            check(decodedReplicate.blockId == "abc" && decodedReplicate.sourceHost == "127.0.0.1"
+                  && decodedReplicate.sourcePort == 9332, "replicate_block round-trip");
+
+            BlockReport report;
+            report.blocks = {"abc", "def"};
+            const auto decodedReport = BlockReport::decode(report.encode());
+            check(decodedReport.blocks.size() == 2 && decodedReport.blocks[1] == "def",
+                  "block_report round-trip");
+
+            DeleteBlock del;
+            del.blockId = "abc";
+            check(DeleteBlock::decode(del.encode()).blockId == "abc", "delete_block round-trip");
         }
 
         {

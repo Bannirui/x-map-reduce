@@ -76,6 +76,20 @@ namespace xmr {
         std::optional<std::string> assignNext(const Task& task, TimePoint now = Clock::now());
 
         /**
+         * 把任务派给指定的空闲worker(数据本地性调度用)
+         * @param id 指定的worker
+         * @param task 什么任务
+         * @param now
+         * @return 该worker空闲并成功派发返回id 否则空
+         */
+        std::optional<std::string> assignTo(const std::string& id, const Task& task, TimePoint now = Clock::now());
+
+        /**
+         * worker是不是空闲
+         */
+        bool isIdle(const std::string& id) const;
+
+        /**
          * worker给master汇报Done后 master把worker状态置到初始
          * 不是直接置到空闲 什么时候才叫真正的空闲 是worker跟master要任务没要到的时候才叫空闲
          * @param id worker

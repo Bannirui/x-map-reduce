@@ -1,6 +1,6 @@
-add_library(x-client STATIC src/client.cpp src/capi.cpp)
-target_link_libraries(x-client PUBLIC x-protocol)
-target_include_directories(x-client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_library(client STATIC src/client.cpp src/capi.cpp)
+target_link_libraries(client PUBLIC protocol x-dfs)
+target_include_directories(client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_executable(x-submit src/submit.cpp)
-target_link_libraries(x-submit PRIVATE x-client)
+target_link_libraries(x-submit PRIVATE client)

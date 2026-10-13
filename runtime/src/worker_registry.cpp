@@ -83,6 +83,22 @@ namespace xmr {
         return std::nullopt;
     }
 
+    std::optional<std::string> WorkerRegistry::assignTo(const std::string& id, const Task& task, TimePoint now) {
+        const auto it = workers_.find(id);
+        if (it == workers_.end() || it->second.state != WorkerState::Idle) {
+            return std::nullopt;
+        }
+        it->second.state = WorkerState::Busy;
+        it->second.task = task;
+        it->second.taskWatchdog = timers_.addAfter(taskTimeout_, [this, id] { onTaskTimeout(id); }, now);
+        return id;
+    }
+
+    bool WorkerRegistry::isIdle(const std::string& id) const {
+        const auto it = workers_.find(id);
+        return it != workers_.end() && it->second.state == WorkerState::Idle;
+    }
+
     bool WorkerRegistry::complete(const std::string& id) {
         const auto it = workers_.find(id);
         if (it == workers_.end() || it->second.state == WorkerState::Lost) {

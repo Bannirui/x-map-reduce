@@ -142,7 +142,10 @@ int main(int argc, char** argv) {
     const fs::path pluginCache = dir / "plugins";
     std::vector<pid_t> workerPids;
     for (int i = 0; i < 2; ++i) {
-        workerPids.push_back(startProcess(worker, {"--master", address, "--plugin-cache", pluginCache.string()}));
+        const fs::path dataDir = dir / ("blocks" + std::to_string(i));
+        workerPids.push_back(startProcess(worker, {"--master", address,
+                                                   "--plugin-cache", pluginCache.string(),
+                                                   "--data-dir", dataDir.string()}));
     }
 
     // Submit the job (uploading the plugin) and wait for the result.
@@ -174,6 +177,16 @@ int main(int argc, char** argv) {
     check(counts.count("mapreduce") == 1 && counts.at("mapreduce") == "2", "mapreduce should be counted twice");
     check(counts.count("distributed") == 1 && counts.at("distributed") == "1", "distributed should be counted once");
     check(counts.count("scales") == 1 && counts.at("scales") == "1", "scales should be counted once");
+
+    std::size_t blockCount = 0;
+    for (int i = 0; i < 2; ++i) {
+        for (const auto& entry : fs::directory_iterator(dir / ("blocks" + std::to_string(i)))) {
+            if (entry.is_regular_file()) {
+                ++blockCount;
+            }
+        }
+    }
+    check(blockCount == 0, "job blocks are garbage collected at job end");
 
     fs::remove_all(dir);
 

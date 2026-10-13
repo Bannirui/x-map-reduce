@@ -60,47 +60,6 @@ namespace xmr::protocol {
         return message;
     }
 
-    std::vector<std::uint8_t> HelloAck::encode() const {
-        FieldWriter writer;
-        writer.putU64(helloAck::kProtocolVersion, protocolVersion);
-        writer.putString(helloAck::kSessionId, sessionId);
-        writer.putU64(helloAck::kCapabilities, capabilities);
-        writer.putU64(helloAck::kStatusCode, static_cast<std::uint64_t>(statusCode));
-        writer.putString(helloAck::kReason, reason);
-        return writer.take();
-    }
-
-    HelloAck HelloAck::decode(const std::vector<std::uint8_t>& body) {
-        HelloAck message;
-        std::uint32_t seen = 0;
-        FieldReader reader(body);
-        while (reader.next()) {
-            switch (reader.id()) {
-                case helloAck::kProtocolVersion:
-                    message.protocolVersion = reader.asU64();
-                    seen |= 1u << 0;
-                    break;
-                case helloAck::kSessionId:
-                    message.sessionId = reader.asString();
-                    break;
-                case helloAck::kCapabilities:
-                    message.capabilities = reader.asU64();
-                    break;
-                case helloAck::kStatusCode:
-                    message.statusCode = decodeStatus(reader.asU64());
-                    seen |= 1u << 1;
-                    break;
-                case helloAck::kReason:
-                    message.reason = reader.asString();
-                    break;
-                default:
-                    break;
-            }
-        }
-        require((seen & 0b11u) == 0b11u, "hello_ack missing required field");
-        return message;
-    }
-
     std::vector<std::uint8_t> RequestTask::encode() const {
         return {};
     }
@@ -112,7 +71,7 @@ namespace xmr::protocol {
         return {};
     }
 
-    std::vector<std::uint8_t> TaskMessage::encode() const {
+    std::vector<std::uint8_t> TaskAssignment::encode() const {
         FieldWriter writer;
         writer.putU64(taskMsg::kKind, static_cast<std::uint64_t>(kind));
         writer.putU64(taskMsg::kTaskId, taskId);
@@ -125,11 +84,14 @@ namespace xmr::protocol {
         for (const auto& location : locations) {
             writer.putString(taskMsg::kLocation, location);
         }
+        for (const auto& block : blocks) {
+            writer.putString(taskMsg::kBlock, block);
+        }
         return writer.take();
     }
 
-    TaskMessage TaskMessage::decode(const std::vector<std::uint8_t>& body) {
-        TaskMessage message;
+    TaskAssignment TaskAssignment::decode(const std::vector<std::uint8_t>& body) {
+        TaskAssignment message;
         std::uint32_t seen = 0;
         FieldReader reader(body);
         while (reader.next()) {
@@ -160,6 +122,9 @@ namespace xmr::protocol {
                 case taskMsg::kLocation:
                     message.locations.push_back(reader.asString());
                     break;
+                case taskMsg::kBlock:
+                    message.blocks.push_back(reader.asString());
+                    break;
                 default:
                     break;
             }
@@ -171,27 +136,7 @@ namespace xmr::protocol {
         return message;
     }
 
-    std::vector<std::uint8_t> InputRequest::encode() const {
-        FieldWriter writer;
-        writer.putU64(inputRequest::kTaskId, taskId);
-        return writer.take();
-    }
-
-    InputRequest InputRequest::decode(const std::vector<std::uint8_t>& body) {
-        InputRequest message;
-        bool seen = false;
-        FieldReader reader(body);
-        while (reader.next()) {
-            if (reader.id() == inputRequest::kTaskId) {
-                message.taskId = reader.asU64();
-                seen = true;
-            }
-        }
-        require(seen, "input_request missing taskId");
-        return message;
-    }
-
-    std::vector<std::uint8_t> DataMessage::encode() const {
+    std::vector<std::uint8_t> Chunk::encode() const {
         FieldWriter writer;
         writer.putU64(data::kOffset, offset);
         if (total) {
@@ -201,8 +146,8 @@ namespace xmr::protocol {
         return writer.take();
     }
 
-    DataMessage DataMessage::decode(const std::vector<std::uint8_t>& body) {
-        DataMessage message;
+    Chunk Chunk::decode(const std::vector<std::uint8_t>& body) {
+        Chunk message;
         std::uint32_t seen = 0;
         FieldReader reader(body);
         while (reader.next()) {
@@ -226,79 +171,7 @@ namespace xmr::protocol {
         return message;
     }
 
-    std::vector<std::uint8_t> MapOutput::encode() const {
-        FieldWriter writer;
-        writer.putU64(mapOutput::kMapTask, mapTask);
-        writer.putU64(mapOutput::kPartition, partition);
-        writer.putU64(mapOutput::kOffset, offset);
-        writer.putBytes(mapOutput::kPayload, payload);
-        return writer.take();
-    }
-
-    MapOutput MapOutput::decode(const std::vector<std::uint8_t>& body) {
-        MapOutput message;
-        std::uint32_t seen = 0;
-        FieldReader reader(body);
-        while (reader.next()) {
-            switch (reader.id()) {
-                case mapOutput::kMapTask:
-                    message.mapTask = reader.asU64();
-                    seen |= 1u << 0;
-                    break;
-                case mapOutput::kPartition:
-                    message.partition = reader.asU64();
-                    seen |= 1u << 1;
-                    break;
-                case mapOutput::kOffset:
-                    message.offset = reader.asU64();
-                    seen |= 1u << 2;
-                    break;
-                case mapOutput::kPayload:
-                    message.payload = reader.asBytes();
-                    seen |= 1u << 3;
-                    break;
-                default:
-                    break;
-            }
-        }
-        require((seen & 0b1111u) == 0b1111u, "map_output missing required field");
-        return message;
-    }
-
-    std::vector<std::uint8_t> Fetch::encode() const {
-        FieldWriter writer;
-        writer.putU64(fetch::kMapTask, mapTask);
-        writer.putU64(fetch::kPartition, partition);
-        writer.putU64(fetch::kOffset, offset);
-        return writer.take();
-    }
-
-    Fetch Fetch::decode(const std::vector<std::uint8_t>& body) {
-        Fetch message;
-        std::uint32_t seen = 0;
-        FieldReader reader(body);
-        while (reader.next()) {
-            switch (reader.id()) {
-                case fetch::kMapTask:
-                    message.mapTask = reader.asU64();
-                    seen |= 1u << 0;
-                    break;
-                case fetch::kPartition:
-                    message.partition = reader.asU64();
-                    seen |= 1u << 1;
-                    break;
-                case fetch::kOffset:
-                    message.offset = reader.asU64();
-                    break;
-                default:
-                    break;
-            }
-        }
-        require((seen & 0b11u) == 0b11u, "fetch missing required field");
-        return message;
-    }
-
-    std::vector<std::uint8_t> ResultMessage::encode() const {
+    std::vector<std::uint8_t> ReduceResult::encode() const {
         FieldWriter writer;
         writer.putU64(resultMsg::kReduceTask, reduceTask);
         writer.putU64(resultMsg::kOffset, offset);
@@ -306,8 +179,8 @@ namespace xmr::protocol {
         return writer.take();
     }
 
-    ResultMessage ResultMessage::decode(const std::vector<std::uint8_t>& body) {
-        ResultMessage message;
+    ReduceResult ReduceResult::decode(const std::vector<std::uint8_t>& body) {
+        ReduceResult message;
         std::uint32_t seen = 0;
         FieldReader reader(body);
         while (reader.next()) {
@@ -438,14 +311,14 @@ namespace xmr::protocol {
         return message;
     }
 
-    std::vector<std::uint8_t> Stop::encode() const {
+    std::vector<std::uint8_t> JobFinished::encode() const {
         FieldWriter writer;
         writer.putString(stop::kReason, reason);
         return writer.take();
     }
 
-    Stop Stop::decode(const std::vector<std::uint8_t>& body) {
-        Stop message;
+    JobFinished JobFinished::decode(const std::vector<std::uint8_t>& body) {
+        JobFinished message;
         FieldReader reader(body);
         while (reader.next()) {
             if (reader.id() == stop::kReason) {
@@ -595,6 +468,7 @@ namespace xmr::protocol {
     std::vector<std::uint8_t> DataAddress::encode() const {
         FieldWriter writer;
         writer.putU64(dataAddress::kPort, port);
+        writer.putU64(dataAddress::kBlockPort, blockPort);
         return writer.take();
     }
 
@@ -604,6 +478,8 @@ namespace xmr::protocol {
         while (reader.next()) {
             if (reader.id() == dataAddress::kPort) {
                 message.port = reader.asU64();
+            } else if (reader.id() == dataAddress::kBlockPort) {
+                message.blockPort = reader.asU64();
             }
         }
         return message;
@@ -722,15 +598,15 @@ namespace xmr::protocol {
         return message;
     }
 
-    std::vector<std::uint8_t> NeedPlugin::encode() const {
+    std::vector<std::uint8_t> FetchPlugin::encode() const {
         FieldWriter writer;
         writer.putString(needPlugin::kHash, hash);
         writer.putString(needPlugin::kJob, job);
         return writer.take();
     }
 
-    NeedPlugin NeedPlugin::decode(const std::vector<std::uint8_t>& body) {
-        NeedPlugin message;
+    FetchPlugin FetchPlugin::decode(const std::vector<std::uint8_t>& body) {
+        FetchPlugin message;
         FieldReader reader(body);
         while (reader.next()) {
             switch (reader.id()) {
@@ -739,35 +615,6 @@ namespace xmr::protocol {
                     break;
                 case needPlugin::kJob:
                     message.job = reader.asString();
-                    break;
-                default:
-                    break;
-            }
-        }
-        return message;
-    }
-
-    std::vector<std::uint8_t> InputBlob::encode() const {
-        FieldWriter writer;
-        writer.putU64(inputBlob::kIndex, index);
-        writer.putU64(inputBlob::kOffset, offset);
-        writer.putBytes(inputBlob::kPayload, payload);
-        return writer.take();
-    }
-
-    InputBlob InputBlob::decode(const std::vector<std::uint8_t>& body) {
-        InputBlob message;
-        FieldReader reader(body);
-        while (reader.next()) {
-            switch (reader.id()) {
-                case inputBlob::kIndex:
-                    message.index = reader.asU64();
-                    break;
-                case inputBlob::kOffset:
-                    message.offset = reader.asU64();
-                    break;
-                case inputBlob::kPayload:
-                    message.payload = reader.asBytes();
                     break;
                 default:
                     break;
@@ -825,6 +672,138 @@ namespace xmr::protocol {
                     break;
                 default:
                     break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> BlockManifest::encode() const {
+        FieldWriter writer;
+        for (const auto& block : blocks) {
+            writer.putString(blockManifest::kBlock, block);
+        }
+        return writer.take();
+    }
+
+    BlockManifest BlockManifest::decode(const std::vector<std::uint8_t>& body) {
+        BlockManifest message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            if (reader.id() == blockManifest::kBlock) {
+                message.blocks.push_back(reader.asString());
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> BlockPlacement::encode() const {
+        FieldWriter writer;
+        writer.putU64(blockPlacement::kStatusCode, static_cast<std::uint64_t>(statusCode));
+        writer.putString(blockPlacement::kReason, reason);
+        for (const auto& replica : replicas) {
+            writer.putString(blockPlacement::kReplica, replica);
+        }
+        return writer.take();
+    }
+
+    BlockPlacement BlockPlacement::decode(const std::vector<std::uint8_t>& body) {
+        BlockPlacement message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case blockPlacement::kStatusCode:
+                    message.statusCode = decodeStatus(reader.asU64());
+                    break;
+                case blockPlacement::kReason:
+                    message.reason = reader.asString();
+                    break;
+                case blockPlacement::kReplica:
+                    message.replicas.push_back(reader.asString());
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> UploadDone::encode() const {
+        FieldWriter writer;
+        writer.putString(uploadDone::kJob, job);
+        return writer.take();
+    }
+
+    UploadDone UploadDone::decode(const std::vector<std::uint8_t>& body) {
+        UploadDone message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            if (reader.id() == uploadDone::kJob) {
+                message.job = reader.asString();
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> ReplicateBlock::encode() const {
+        FieldWriter writer;
+        writer.putString(replicateBlock::kBlockId, blockId);
+        writer.putString(replicateBlock::kSourceHost, sourceHost);
+        writer.putU64(replicateBlock::kSourcePort, sourcePort);
+        return writer.take();
+    }
+
+    ReplicateBlock ReplicateBlock::decode(const std::vector<std::uint8_t>& body) {
+        ReplicateBlock message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case replicateBlock::kBlockId:
+                    message.blockId = reader.asString();
+                    break;
+                case replicateBlock::kSourceHost:
+                    message.sourceHost = reader.asString();
+                    break;
+                case replicateBlock::kSourcePort:
+                    message.sourcePort = reader.asU64();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> BlockReport::encode() const {
+        FieldWriter writer;
+        for (const auto& block : blocks) {
+            writer.putString(blockReport::kBlock, block);
+        }
+        return writer.take();
+    }
+
+    BlockReport BlockReport::decode(const std::vector<std::uint8_t>& body) {
+        BlockReport message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            if (reader.id() == blockReport::kBlock) {
+                message.blocks.push_back(reader.asString());
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> DeleteBlock::encode() const {
+        FieldWriter writer;
+        writer.putString(deleteBlock::kBlockId, blockId);
+        return writer.take();
+    }
+
+    DeleteBlock DeleteBlock::decode(const std::vector<std::uint8_t>& body) {
+        DeleteBlock message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            if (reader.id() == deleteBlock::kBlockId) {
+                message.blockId = reader.asString();
             }
         }
         return message;

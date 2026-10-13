@@ -7,14 +7,14 @@
 
 namespace {
 
-std::atomic<int> failures{0};
+    std::atomic<int> failures{0};
 
-void check(bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
+    void check(bool condition, const std::string& message) {
+        if (!condition) {
+            std::cerr << "FAIL: " << message << '\n';
+            ++failures;
+        }
     }
-}
 
 }  // namespace
 
@@ -68,12 +68,10 @@ int main() {
                   "worker expires at the refreshed deadline");
             check(registry.state("w1") == WorkerState::Lost, "expired worker is marked Lost");
             check(!registry.markIdle("w1"), "lost worker cannot go idle");
-            check(registry.nextTimeoutMs(t0 + milliseconds(200)) == -1,
-                  "no pending watchdog after expiry");
+            check(registry.nextTimeoutMs(t0 + milliseconds(200)) == -1, "no pending watchdog after expiry");
             check(registry.touch("w1", t0 + milliseconds(200)), "activity revives a lost worker");
             check(registry.state("w1") == WorkerState::Registered, "revived worker is Registered");
-            check(registry.nextTimeoutMs(t0 + milliseconds(200)) == 100,
-                  "revived worker gets a fresh watchdog");
+            check(registry.nextTimeoutMs(t0 + milliseconds(200)) == 100, "revived worker gets a fresh watchdog");
             check(registry.markIdle("w1"), "revived worker can go idle");
             check(registry.remove("w1"), "lost worker can still be removed");
         }
@@ -84,12 +82,10 @@ int main() {
             registry.add("w2", t0);
             registry.touch("w2", t0 + milliseconds(50));
             check(registry.nextTimeoutMs(t0) == 100, "timeout follows the earliest watchdog");
-            check(registry.poll(t0 + milliseconds(100)).workers.size() == 1,
-                  "only the stale worker expires first");
+            check(registry.poll(t0 + milliseconds(100)).workers.size() == 1, "only the stale worker expires first");
             check(registry.state("w1") == WorkerState::Lost, "earliest deadline worker is lost");
             check(registry.state("w2") == WorkerState::Registered, "refreshed worker stays live");
-            check(registry.nextTimeoutMs(t0 + milliseconds(100)) == 50,
-                  "remaining watchdog keeps contributing");
+            check(registry.nextTimeoutMs(t0 + milliseconds(100)) == 50, "remaining watchdog keeps contributing");
         }
 
         {
@@ -119,6 +115,26 @@ int main() {
         {
             WorkerRegistry registry(milliseconds(1000), milliseconds(1000));
             registry.add("w1", t0);
+            registry.add("w2", t0);
+            check(!registry.isIdle("w1"), "registered worker is not idle");
+            check(!registry.isIdle("missing"), "unknown worker is not idle");
+            registry.markIdle("w1");
+            check(registry.isIdle("w1"), "idle worker reports idle");
+            Task task;
+            task.kind = TaskKind::Map;
+            task.id = 11;
+            check(!registry.assignTo("w2", task, t0).has_value(), "assignTo a non-idle worker fails");
+            const auto assigned = registry.assignTo("w1", task, t0);
+            check(assigned.has_value() && *assigned == "w1", "assignTo an idle worker succeeds");
+            check(registry.state("w1") == WorkerState::Busy, "assignTo marks the worker busy");
+            check(!registry.isIdle("w1"), "assigned worker is no longer idle");
+            const auto held = registry.taskOf("w1");
+            check(held.has_value() && held->id == 11, "assignTo records the task");
+        }
+
+        {
+            WorkerRegistry registry(milliseconds(1000), milliseconds(1000));
+            registry.add("w1", t0);
             registry.markIdle("w1");
             Task task;
             task.kind = TaskKind::Map;
@@ -143,8 +159,7 @@ int main() {
             check(registry.nextTimeoutMs(t0) == 100, "task watchdog contributes a timeout");
             check(registry.poll(t0 + milliseconds(99)).tasks.empty(), "task is not timed out early");
             const auto timedOut = registry.poll(t0 + milliseconds(100));
-            check(timedOut.tasks.size() == 1 && timedOut.tasks[0].id == 3,
-                  "task timeout is reported for retry");
+            check(timedOut.tasks.size() == 1 && timedOut.tasks[0].id == 3, "task timeout is reported for retry");
             check(timedOut.workers.empty(), "task timeout does not mark the worker lost");
             check(registry.state("w1") == WorkerState::Busy, "worker stays Busy after a task timeout");
             check(!registry.taskOf("w1").has_value(), "timed-out task is detached from the worker");

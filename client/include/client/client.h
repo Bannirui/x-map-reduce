@@ -60,7 +60,14 @@ namespace xmr::client {
         void send(protocol::MessageType type, std::uint32_t requestId,
                   const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
 
+        template <class Message>
+        void send(std::uint32_t requestId, const Message& message, std::uint16_t flags = 0) {
+            send(Message::kType, requestId, message.encode(), flags);
+        }
+
         protocol::Frame receive();
+
+        bool uploadBlocks(const std::vector<std::vector<std::uint8_t> >& inputs, std::string& reason);
 
         void onFrame(protocol::Frame frame);
 

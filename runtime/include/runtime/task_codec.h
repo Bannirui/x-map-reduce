@@ -8,7 +8,7 @@ namespace xmr {
 
     TaskKind taskKind(protocol::WorkKind kind);
 
-    Task toTask(const protocol::TaskMessage& message);
+    Task toTask(const protocol::TaskAssignment& message);
 
-    protocol::TaskMessage toTaskMessage(const Task& task);
+    protocol::TaskAssignment toTaskAssignment(const Task& task);
 } // namespace xmr

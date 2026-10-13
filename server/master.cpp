@@ -1,12 +1,13 @@
-#include"protocol/frame_codec.h"
-#include"protocol/framing.h"
-#include"protocol/messages.h"
-#include"runtime/exit_code.h"
-#include"runtime/scheduler.h"
-#include"runtime/task.h"
-#include"runtime/task_codec.h"
-#include"runtime/worker_registry.h"
-#include"mapreduce/mapreduce.h"
+#include "mapreduce/mapreduce.h"
+#include "protocol/frame_codec.h"
+#include "protocol/framing.h"
+#include "protocol/messages.h"
+#include "runtime/endpoint.h"
+#include "runtime/exit_code.h"
+#include "runtime/scheduler.h"
+#include "runtime/task.h"
+#include "runtime/task_codec.h"
+#include "runtime/worker_registry.h"
 
 #include <xnet/bootstrap.h>
 #include <xnet/channel.h>
@@ -17,31 +18,30 @@
 #include <xnet/event_loop_group.h>
 #include <xnet/net.h>
 
-#include<algorithm>
-#include<atomic>
-#include<chrono>
-#include<cstddef>
-#include<cstdint>
-#include<exception>
-#include<fstream>
-#include<future>
-#include<iostream>
-#include<iterator>
-#include<memory>
-#include<optional>
-#include<stdexcept>
-#include<string>
-#include<thread>
-#include<unordered_map>
-#include<unordered_set>
-#include<utility>
-#include<vector>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
-#include<sys/socket.h>
-#include<unistd.h>
-
-#include<arpa/inet.h>
-#include<netinet/in.h>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <fstream>
+#include <future>
+#include <iostream>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <unistd.h>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace {
     // master判定worker心跳超时的阈值
@@ -58,6 +58,9 @@ namespace {
     constexpr std::uint16_t kDefaultDataPort = 9331;
     // todo 长尾任务的判定 静态方式后面要改成动态判定 master根据worker上报的信息判断
     constexpr std::chrono::seconds kMinSpeculate{3};
+    constexpr std::size_t kBlockReplicas{3};
+
+    static std::string manifestBlockId(const std::string& entry);
 
     using ConnId = std::uint64_t;
     using TimePoint = std::chrono::steady_clock::time_point;
@@ -82,18 +85,6 @@ namespace {
     };
 
     /**
-     * @param endpoint host:port格式
-     */
-    std::pair<std::string, std::uint16_t> parseEndpoint(const std::string& endpoint) {
-        const auto colon = endpoint.rfind(':');
-        if (colon == std::string::npos) {
-            throw std::runtime_error("expected host:port in '" + endpoint + "'");
-        }
-        return {endpoint.substr(0, colon),
-                static_cast<std::uint16_t>(std::stoul(endpoint.substr(colon + 1)))};
-    }
-
-    /**
      * @param value 启动的时候--listen只传了端口号
      * @param defaultHost 给拼接成完整的host:port
      */
@@ -101,9 +92,10 @@ namespace {
         if (value.find(':') == std::string::npos) {
             return {defaultHost, static_cast<std::uint16_t>(std::stoul(value))};
         }
-        return parseEndpoint(value);
+        return xmr::parseEndpoint(value);
     }
 
+    // 启动服务端需要指定参数 提示参数
     void usage(const char* program) {
         std::cerr << "Usage: " << program << " --listen <port> [--data-listen <port>]\n";
     }
@@ -128,17 +120,18 @@ namespace {
     // 一次提交进来的一次job运行的全部状态
     struct JobState {
         JobState(std::string job, std::vector<std::string> inputs, std::size_t reducers,
-                 std::vector<std::string> inputData, std::string output, ConnId client)
+                 std::vector<std::vector<std::string> > mapBlocks, std::string output, ConnId client)
             : scheduler(job, inputs, reducers),
               name(std::move(job)),
-              inputData(std::move(inputData)),
+              maps(inputs.size()),
+              mapBlocks(std::move(mapBlocks)),
               output(std::move(output)),
-              client(client) {
-        }
+              client(client) {}
 
         xmr::Scheduler scheduler;
         std::string name;
-        std::vector<std::string> inputData;
+        std::size_t maps = 0;
+        std::vector<std::vector<std::string> > mapBlocks;
         std::vector<KeyValue> merged;
         std::string output;
         ConnId client = 0;
@@ -150,8 +143,7 @@ namespace {
      */
     class Coordinator {
     public:
-        Coordinator() : registry_(kHeartbeatTimeout, kTaskTimeout) {
-        }
+        Coordinator() : registry_(kHeartbeatTimeout, kTaskTimeout) {}
 
         void setLoop(EventLoop* loop) {
             loop_ = loop;
@@ -168,9 +160,12 @@ namespace {
 
         // master端的线程模型 Pregel算法的super step 每隔多久一个loop
         void start() {
-            loop_->addInterval(kTick, [this] { tick(); });
+            loop_->addInterval(kTick, [this] {
+                tick();
+            });
         }
 
+        /// @brief 有人连接进来就给缓存起来
         void onConnect(std::shared_ptr<ConnState> conn) {
             conns_[conn->id] = std::move(conn);
         }
@@ -200,7 +195,8 @@ namespace {
         // master线程模型 每隔多久一个loop
         void tick();
 
-        void startJob(ConnId client, const xmr::protocol::Submit& submit, std::vector<std::string> inputData);
+        void startJob(ConnId client, const xmr::protocol::Submit& submit,
+                      std::vector<std::vector<std::string> > mapBlocks);
 
         // 输入+插件都收齐了就开跑
         void maybeStartJob();
@@ -226,11 +222,34 @@ namespace {
          */
         void dispatch();
 
+        // 数据本地性: 在持有该map任务输入block的空闲worker里挑一个 缺本地返回空
+        std::optional<std::string> assignLocal(const xmr::Task& task, TimePoint now);
+
         // 拼reduce任务要用的拉取计划 mapTask,host,port
         std::vector<std::string> fetchPlan() const;
 
+        // 有block清单且worker就绪时 给client分配副本位置并记录locator
+        void tryPlaceBlocks();
+
+        // 把每个输入文件的block位置(含副本)拼成派给map任务的形式
+        std::vector<std::vector<std::string> > buildMapBlocks() const;
+
+        // worker是否在线且没有被判定下线
+        bool isLive(const std::string& workerId) const;
+
+        // 忘掉某个worker持有的block 并清掉它的进行中复制
+        void forgetWorker(const std::string& workerId);
+
+        // 副本不足的block从存活副本重复制到其它在线worker
+        void reReplicate();
+
         void send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId,
                   const std::vector<std::uint8_t>& body, std::uint16_t flags = 0);
+
+        template <class Message>
+        void send(ConnId id, std::uint32_t requestId, const Message& message, std::uint16_t flags = 0) {
+            send(id, Message::kType, requestId, message.encode(), flags);
+        }
 
         void sendBlob(ConnId id, std::uint32_t requestId, const std::string& blob);
 
@@ -257,6 +276,17 @@ namespace {
         std::unordered_map<std::string, ConnId> byWorker_;
         // worker的数据面地址 host + port
         std::unordered_map<std::string, std::pair<std::string, std::uint16_t> > workerData_;
+        std::unordered_map<std::string, std::uint16_t> workerBlock_;
+
+        struct PendingManifest {
+            ConnId client = 0;
+            std::uint32_t requestId = 0;
+            xmr::protocol::BlockManifest manifest;
+        };
+
+        std::optional<PendingManifest> pendingManifest_;
+        std::unordered_map<std::string, std::unordered_set<std::string> > workerBlocks_;
+        std::unordered_set<std::string> replicating_;
         // map任务执行的中间结果在哪个worker上 k=任务id v=worker的id
         std::unordered_map<std::size_t, std::string> mapOwner_;
 
@@ -266,10 +296,11 @@ namespace {
             xmr::protocol::Submit submit;
             std::uint32_t requestId = 0;
         };
-        // client会把map阶段用到的input从数据端口传过来 master把input缓存起来
-        std::vector<std::string> inputUpload_;
-        // client还没传input进来
-        std::size_t inputDone_ = 0;
+
+        // 每个输入文件按顺序的blockId列表 由client的block清单得到
+        std::vector<std::vector<std::string> > pendingInputBlocks_;
+        // client是否已把全部block直接写到worker并通知完成
+        bool uploadDone_ = false;
         // 按内容哈希存插件二进制
         std::unordered_map<std::string, std::vector<std::uint8_t> > pluginStore_;
         // 当前job的插件哈希 空表示worker本地已预加载
@@ -302,17 +333,21 @@ namespace {
         if (stopping_.load()) {
             return;
         }
+        tryPlaceBlocks();
         const auto now = std::chrono::steady_clock::now();
         const auto expired = registry_.poll(now);
         // 没有按时发送心跳的worker
         for (const auto& workerId : expired.workers) {
             // 这些worker被master判定挂了 要把worker已经完成的任务回收过来重新派发给其他worker
+            forgetWorker(workerId);
             recoverWorker(workerId);
         }
         for (const auto& task : expired.tasks) {
             // 任务超时了 重新派发
             retryOrFail(task);
         }
+        // 副本数不够的block从存活副本重复制
+        reReplicate();
         if (!job_) {
             return;
         }
@@ -325,9 +360,9 @@ namespace {
     }
 
     void Coordinator::startJob(ConnId client, const xmr::protocol::Submit& submit,
-                               std::vector<std::string> inputData) {
-        job_ = std::make_unique<JobState>(submit.job, submit.inputs, submit.reducers,
-                                          std::move(inputData), submit.output, client);
+                               std::vector<std::vector<std::string> > mapBlocks) {
+        job_ = std::make_unique<JobState>(submit.job, submit.inputs, submit.reducers, std::move(mapBlocks),
+                                          submit.output, client);
         mapOwner_.clear();
         pluginHash_ = submit.pluginHash;
         pluginReady_ = 0;
@@ -348,7 +383,7 @@ namespace {
         if (!pending_) {
             return;
         }
-        if (inputDone_ < inputUpload_.size()) {
+        if (!uploadDone_) {
             return;
         }
         const std::string& hash = pending_->submit.pluginHash;
@@ -357,11 +392,10 @@ namespace {
         }
         const ConnId client = pending_->client;
         const xmr::protocol::Submit submit = pending_->submit;
-        std::vector<std::string> inputData = std::move(inputUpload_);
-        inputUpload_.clear();
-        inputDone_ = 0;
+        std::vector<std::vector<std::string> > mapBlocks = buildMapBlocks();
         pending_.reset();
-        startJob(client, submit, std::move(inputData));
+        uploadDone_ = false;
+        startJob(client, submit, std::move(mapBlocks));
     }
 
     void Coordinator::sendPlugin(ConnId id) {
@@ -369,25 +403,26 @@ namespace {
         if (pluginHash_.empty() || !job_) {
             return;
         }
-        xmr::protocol::NeedPlugin need;
+        xmr::protocol::FetchPlugin need;
         need.hash = pluginHash_;
         need.job = job_->name;
-        send(id, xmr::protocol::MessageType::NeedPlugin, 0, need.encode());
+        send(id, 0, need);
     }
 
     void Coordinator::finishJob() {
         const bool ok = !job_->scheduler.failed();
         // 通知worker本job结束 复位准备接下一个job
-        xmr::protocol::Stop stop;
+        xmr::protocol::JobFinished stop;
         for (const auto& [name, cid] : byWorker_) {
-            send(cid, xmr::protocol::MessageType::Stop, 0, stop.encode());
+            send(cid, 0, stop);
         }
 
         xmr::protocol::SubmitResult result;
         if (ok) {
             auto& merged = job_->merged;
-            std::stable_sort(merged.begin(), merged.end(),
-                             [](const KeyValue& a, const KeyValue& b) { return a.first < b.first; });
+            std::stable_sort(merged.begin(), merged.end(), [](const KeyValue& a, const KeyValue& b) {
+                return a.first < b.first;
+            });
             try {
                 WriteKeyValues(job_->output, merged);
                 result.statusCode = xmr::protocol::StatusCode::Ok;
@@ -401,8 +436,32 @@ namespace {
             result.reason = job_->scheduler.error();
         }
         if (job_->client != 0) {
-            send(job_->client, xmr::protocol::MessageType::SubmitResult, 0, result.encode());
+            send(job_->client, 0, result);
         }
+        // job结束 回收本次job的block 让worker删掉它
+        std::unordered_set<std::string> jobBlocks;
+        for (const auto& perInput : job_->mapBlocks) {
+            for (const auto& entry : perInput) {
+                const auto comma = entry.find(',');
+                jobBlocks.insert(comma == std::string::npos ? entry : entry.substr(0, comma));
+            }
+        }
+        for (const auto& workerEntry : workerBlocks_) {
+            const auto byName = byWorker_.find(workerEntry.first);
+            if (byName == byWorker_.end()) {
+                continue;
+            }
+            for (const auto& blockId : workerEntry.second) {
+                if (jobBlocks.count(blockId) == 0) {
+                    continue;
+                }
+                xmr::protocol::DeleteBlock request;
+                request.blockId = blockId;
+                send(byName->second, 0, request);
+            }
+        }
+        workerBlocks_.clear();
+        replicating_.clear();
         job_.reset();
     }
 
@@ -423,7 +482,7 @@ namespace {
                         xmr::protocol::SubmitAck ack;
                         ack.statusCode = xmr::protocol::StatusCode::Unavailable;
                         ack.reason = "a job is already running";
-                        send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
+                        send(id, frame.header.requestId, ack);
                         break;
                     }
                     // client给master提交的job
@@ -435,17 +494,17 @@ namespace {
                     if (submit.job.empty() || submit.output.empty() || submit.inputs.empty() || submit.reducers == 0) {
                         ack.statusCode = xmr::protocol::StatusCode::InvalidArgument;
                         ack.reason = "invalid submit";
-                        send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
+                        send(id, frame.header.requestId, ack);
                         break;
                     }
                     // 标识master已经开始受理client的job了 现在开始等client把master需要的job插件和input传进来
                     pending_ = Pending{id, submit, frame.header.requestId};
                     // 将来接收client从数据端口传input
-                    inputUpload_.assign(submit.inputs.size(), std::string());
+                    pendingInputBlocks_.assign(submit.inputs.size(), {});
                     // 总共M个数据 client会从数据端口传过来 每传过来一个就统计起来 保证map阶段依赖的数据是全的
-                    inputDone_ = 0;
+                    uploadDone_ = false;
                     ack.statusCode = xmr::protocol::StatusCode::Ok;
-                    send(id, xmr::protocol::MessageType::SubmitAck, frame.header.requestId, ack.encode());
+                    send(id, frame.header.requestId, ack);
                     break;
                 }
                 case xmr::protocol::MessageType::Plugin: {
@@ -464,8 +523,7 @@ namespace {
                             xmr::protocol::SubmitAck error;
                             error.statusCode = xmr::protocol::StatusCode::Internal;
                             error.reason = "plugin hash mismatch";
-                            send(pending_->client, xmr::protocol::MessageType::SubmitAck,
-                                 pending_->requestId, error.encode());
+                            send(pending_->client, pending_->requestId, error);
                             pending_.reset();
                         }
                         conn.uploadBuffer.clear();
@@ -476,39 +534,8 @@ namespace {
                     maybeStartJob();
                     break;
                 }
-                case xmr::protocol::MessageType::InputBlob: {
-                    // client在数据端口把map任务需要的输入input传上来
-                    if (!pending_) {
-                        break;
-                    }
-                    const auto chunk = xmr::protocol::InputBlob::decode(frame.body);
-                    if (chunk.index >= inputUpload_.size()) {
-                        fail("bad input index");
-                        break;
-                    }
-                    std::string& buffer = inputUpload_[chunk.index];
-                    if (chunk.offset != buffer.size()) {
-                        fail("bad input chunk");
-                        break;
-                    }
-                    buffer.append(chunk.payload.begin(), chunk.payload.end());
-                    if ((frame.header.flags & static_cast<std::uint16_t>(xmr::protocol::Flag::More)) != 0) {
-                        break;
-                    }
-                    ++inputDone_;
-                    maybeStartJob();
-                    break;
-                }
                 case xmr::protocol::MessageType::PullInput: {
-                    if (!job_) {
-                        break;
-                    }
                     // worker从数据端口拉map输入
-                    const auto request = xmr::protocol::PullInput::decode(frame.body);
-                    if (request.taskId >= job_->inputData.size()) {
-                        throw std::runtime_error("INPUT out of range");
-                    }
-                    sendBlob(id, frame.header.requestId, job_->inputData[request.taskId]);
                     break;
                 }
                 case xmr::protocol::MessageType::PullPlugin: {
@@ -550,7 +577,7 @@ namespace {
                         // 告诉worker master数据端口 供它拉输入/插件
                         xmr::protocol::MasterData data;
                         data.port = dataPort_;
-                        send(id, xmr::protocol::MessageType::MasterData, 0, data.encode());
+                        send(id, 0, data);
                     }
                     if (job_ && !pluginHash_.empty() && conn.plugins.count(pluginHash_) == 0) {
                         sendPlugin(id);
@@ -561,6 +588,55 @@ namespace {
                     // worker上报自己的数据监听端口 供其它worker拉中间结果
                     const auto address = xmr::protocol::DataAddress::decode(frame.body);
                     workerData_[conn.workerId] = {conn.host, static_cast<std::uint16_t>(address.port)};
+                    if (address.blockPort != 0) {
+                        workerBlock_[conn.workerId] = static_cast<std::uint16_t>(address.blockPort);
+                    }
+                    tryPlaceBlocks();
+                    break;
+                }
+                case xmr::protocol::MessageType::BlockManifest: {
+                    // client把切好的block清单报上来 请master按副本策略分配worker
+                    PendingManifest request;
+                    request.client = id;
+                    request.requestId = frame.header.requestId;
+                    request.manifest = xmr::protocol::BlockManifest::decode(frame.body);
+                    for (const auto& entry : request.manifest.blocks) {
+                        const auto first = entry.find(',');
+                        if (first == std::string::npos) {
+                            continue;
+                        }
+                        const std::size_t input = static_cast<std::size_t>(std::stoull(entry.substr(0, first)));
+                        const std::string blockId = manifestBlockId(entry);
+                        if (input < pendingInputBlocks_.size() && !blockId.empty()) {
+                            pendingInputBlocks_[input].push_back(blockId);
+                        }
+                    }
+                    pendingManifest_ = std::move(request);
+                    tryPlaceBlocks();
+                    break;
+                }
+                case xmr::protocol::MessageType::UploadDone: {
+                    uploadDone_ = true;
+                    maybeStartJob();
+                    break;
+                }
+                case xmr::protocol::MessageType::BlockReport: {
+                    // worker上报本地持有的block清单 master据此重建locator
+                    const auto report = xmr::protocol::BlockReport::decode(frame.body);
+                    std::unordered_set<std::string>& held = workerBlocks_[conn.workerId];
+                    held.clear();
+                    for (const auto& blockId : report.blocks) {
+                        held.insert(blockId);
+                    }
+                    const std::string suffix = "@" + conn.workerId;
+                    for (auto it = replicating_.begin(); it != replicating_.end();) {
+                        if (it->size() >= suffix.size() &&
+                            it->compare(it->size() - suffix.size(), suffix.size(), suffix) == 0) {
+                            it = replicating_.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
                     break;
                 }
                 case xmr::protocol::MessageType::RequestTask: {
@@ -613,15 +689,15 @@ namespace {
                     registry_.complete(conn.workerId);
                     break;
                 }
-                case xmr::protocol::MessageType::Result: {
+                case xmr::protocol::MessageType::ReduceResult: {
                     if (!job_) {
                         break;
                     }
                     // worker执行完了reduce 把最终结果给到了master
-                    const auto result = xmr::protocol::ResultMessage::decode(frame.body);
+                    const auto result = xmr::protocol::ReduceResult::decode(frame.body);
                     auto pairs = xmr::deserializeKeyValues(std::string(result.payload.begin(), result.payload.end()));
-                    job_->merged.insert(job_->merged.end(),
-                                        std::make_move_iterator(pairs.begin()), std::make_move_iterator(pairs.end()));
+                    job_->merged.insert(job_->merged.end(), std::make_move_iterator(pairs.begin()),
+                                        std::make_move_iterator(pairs.end()));
                     break;
                 }
                 case xmr::protocol::MessageType::Ping: {
@@ -629,7 +705,7 @@ namespace {
                     const auto ping = xmr::protocol::Ping::decode(frame.body);
                     xmr::protocol::Pong pong;
                     pong.nonce = ping.nonce;
-                    send(id, xmr::protocol::MessageType::Pong, frame.header.requestId, pong.encode());
+                    send(id, frame.header.requestId, pong);
                     break;
                 }
                 case xmr::protocol::MessageType::Progress: {
@@ -661,13 +737,16 @@ namespace {
             registry_.remove(conn->workerId);
             byWorker_.erase(conn->workerId);
             workerData_.erase(conn->workerId);
+            workerBlock_.erase(conn->workerId);
+            forgetWorker(conn->workerId);
+            reReplicate();
         }
         conns_.erase(it);
     }
 
     std::vector<std::string> Coordinator::fetchPlan() const {
         std::vector<std::string> locations;
-        for (std::size_t mapTask = 0; mapTask < job_->inputData.size(); ++mapTask) {
+        for (std::size_t mapTask = 0; mapTask < job_->maps; ++mapTask) {
             const auto owner = mapOwner_.find(mapTask);
             if (owner == mapOwner_.end()) {
                 continue;
@@ -676,12 +755,163 @@ namespace {
             if (address == workerData_.end()) {
                 continue;
             }
-            locations.push_back(std::to_string(mapTask) + "," + address->second.first
-                                + "," + std::to_string(address->second.second));
+            locations.push_back(std::to_string(mapTask) + "," + address->second.first + "," +
+                                std::to_string(address->second.second));
         }
         return locations;
     }
-    
+
+    static std::string manifestBlockId(const std::string& entry) {
+        const auto first = entry.find(',');
+        if (first == std::string::npos) {
+            return {};
+        }
+        const auto second = entry.find(',', first + 1);
+        if (second == std::string::npos) {
+            return {};
+        }
+        const auto third = entry.find(',', second + 1);
+        if (third == std::string::npos) {
+            return {};
+        }
+        return entry.substr(second + 1, third - second - 1);
+    }
+
+    void Coordinator::tryPlaceBlocks() {
+        if (!pendingManifest_) {
+            return;
+        }
+        std::vector<std::string> ready;
+        for (const auto& entry : workerBlock_) {
+            if (workerData_.count(entry.first) != 0 && isLive(entry.first)) {
+                ready.push_back(entry.first);
+            }
+        }
+        if (ready.empty()) {
+            return;
+        }
+        std::sort(ready.begin(), ready.end());
+        const std::size_t replicas = std::min<std::size_t>(kBlockReplicas, ready.size());
+        xmr::protocol::BlockPlacement placement;
+        std::size_t blockIndex = 0;
+        for (const auto& block : pendingManifest_->manifest.blocks) {
+            const std::string blockId = manifestBlockId(block);
+            if (blockId.empty()) {
+                ++blockIndex;
+                continue;
+            }
+            for (std::size_t r = 0; r < replicas; ++r) {
+                const std::string& workerId = ready[(blockIndex + r) % ready.size()];
+                workerBlocks_[workerId].insert(blockId);
+                const auto address = workerData_.find(workerId);
+                placement.replicas.push_back(blockId + "," + address->second.first + "," +
+                                             std::to_string(workerBlock_[workerId]));
+            }
+            ++blockIndex;
+        }
+        placement.statusCode = xmr::protocol::StatusCode::Ok;
+        send(pendingManifest_->client, pendingManifest_->requestId, placement);
+        pendingManifest_.reset();
+    }
+
+    std::vector<std::vector<std::string> > Coordinator::buildMapBlocks() const {
+        std::vector<std::vector<std::string> > result(pendingInputBlocks_.size());
+        for (std::size_t input = 0; input < pendingInputBlocks_.size(); ++input) {
+            for (const auto& blockId : pendingInputBlocks_[input]) {
+                for (const auto& entry : workerBlocks_) {
+                    if (entry.second.count(blockId) == 0) {
+                        continue;
+                    }
+                    const std::string& workerId = entry.first;
+                    const auto address = workerData_.find(workerId);
+                    const auto port = workerBlock_.find(workerId);
+                    if (address == workerData_.end() || port == workerBlock_.end()) {
+                        continue;
+                    }
+                    result[input].push_back(blockId + "," + address->second.first + "," + std::to_string(port->second));
+                }
+            }
+        }
+        return result;
+    }
+
+    bool Coordinator::isLive(const std::string& workerId) const {
+        if (byWorker_.find(workerId) == byWorker_.end()) {
+            return false;
+        }
+        if (!registry_.contains(workerId)) {
+            return false;
+        }
+        return registry_.state(workerId) != xmr::WorkerState::Lost;
+    }
+
+    void Coordinator::forgetWorker(const std::string& workerId) {
+        workerBlocks_.erase(workerId);
+        const std::string suffix = "@" + workerId;
+        for (auto it = replicating_.begin(); it != replicating_.end();) {
+            if (it->size() >= suffix.size() && it->compare(it->size() - suffix.size(), suffix.size(), suffix) == 0) {
+                it = replicating_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void Coordinator::reReplicate() {
+        if (workerBlocks_.empty()) {
+            return;
+        }
+        std::unordered_map<std::string, std::vector<std::string> > holders;
+        for (const auto& entry : workerBlocks_) {
+            if (!isLive(entry.first)) {
+                continue;
+            }
+            for (const auto& blockId : entry.second) {
+                holders[blockId].push_back(entry.first);
+            }
+        }
+        std::vector<std::string> targets;
+        for (const auto& entry : workerBlock_) {
+            if (isLive(entry.first)) {
+                targets.push_back(entry.first);
+            }
+        }
+        std::sort(targets.begin(), targets.end());
+        for (const auto& block : holders) {
+            const std::string& blockId = block.first;
+            const std::vector<std::string>& live = block.second;
+            if (live.empty() || live.size() >= kBlockReplicas) {
+                continue;
+            }
+            const auto sourceAddress = workerData_.find(live.front());
+            const auto sourcePort = workerBlock_.find(live.front());
+            if (sourceAddress == workerData_.end() || sourcePort == workerBlock_.end()) {
+                continue;
+            }
+            for (const auto& target : targets) {
+                if (std::find(live.begin(), live.end(), target) != live.end()) {
+                    continue;
+                }
+                const std::string key = blockId + "@" + target;
+                if (replicating_.count(key) != 0) {
+                    continue;
+                }
+                const auto byName = byWorker_.find(target);
+                if (byName == byWorker_.end()) {
+                    continue;
+                }
+                xmr::protocol::ReplicateBlock request;
+                request.blockId = blockId;
+                request.sourceHost = sourceAddress->second.first;
+                request.sourcePort = sourcePort->second;
+                send(byName->second, 0, request);
+                replicating_.insert(key);
+                workerBlocks_[target].insert(blockId);
+                break;
+            }
+        }
+    }
+
     void Coordinator::sendTask(const std::string& workerId, const xmr::Task& task) {
         const auto byName = byWorker_.find(workerId);
         if (byName == byWorker_.end()) {
@@ -692,12 +922,43 @@ namespace {
             return;
         }
         // master向worker派发任务 用控制端口的TCP发个消息
-        auto message = xmr::toTaskMessage(task);
+        auto message = xmr::toTaskAssignment(task);
         if (task.kind == xmr::TaskKind::Reduce) {
-            // map中间结果按照R分区了 所以如果派发的是reduce任务 还得告诉它去哪些worker上的什么地方接数据 也就是woker的数据端口
+            // map中间结果按照R分区了 所以如果派发的是reduce任务 还得告诉它去哪些worker上的什么地方接数据
+            // 也就是woker的数据端口
             message.locations = fetchPlan();
+        } else if (task.id < job_->mapBlocks.size()) {
+            message.blocks = job_->mapBlocks[task.id];
         }
-        send(byName->second, xmr::protocol::MessageType::Task, it->second->lastRequest, message.encode());
+        send(byName->second, it->second->lastRequest, message);
+    }
+
+    std::optional<std::string> Coordinator::assignLocal(const xmr::Task& task, TimePoint now) {
+        if (task.id >= job_->mapBlocks.size()) {
+            return std::nullopt;
+        }
+        std::unordered_map<std::string, int> localCount;
+        for (const auto& entry : job_->mapBlocks[task.id]) {
+            const auto comma = entry.find(',');
+            const std::string blockId = comma == std::string::npos ? entry : entry.substr(0, comma);
+            for (const auto& holder : workerBlocks_) {
+                if (holder.second.count(blockId) != 0 && registry_.isIdle(holder.first)) {
+                    ++localCount[holder.first];
+                }
+            }
+        }
+        std::string best;
+        int bestCount = 0;
+        for (const auto& entry : localCount) {
+            if (best.empty() || entry.second > bestCount || (entry.second == bestCount && entry.first < best)) {
+                best = entry.first;
+                bestCount = entry.second;
+            }
+        }
+        if (best.empty()) {
+            return std::nullopt;
+        }
+        return registry_.assignTo(best, task, now);
     }
 
     void Coordinator::dispatch() {
@@ -717,7 +978,13 @@ namespace {
             }
             const auto now = std::chrono::steady_clock::now();
             // 任务执行倒计时 worker得在限定时间内执行完
-            const auto workerId = registry_.assignNext(*task, now);
+            std::optional<std::string> workerId;
+            if (task->kind == xmr::TaskKind::Map) {
+                workerId = assignLocal(*task, now);
+            }
+            if (!workerId) {
+                workerId = registry_.assignNext(*task, now);
+            }
             if (!workerId) {
                 break;
             }
@@ -771,7 +1038,7 @@ namespace {
             }
             const auto task = registry_.taskOf(entry.first);
             if (task && task->kind == kind && task->id == id) {
-                send(entry.second, xmr::protocol::MessageType::Cancel, 0, cancel.encode());
+                send(entry.second, 0, cancel);
             }
         }
     }
@@ -781,8 +1048,9 @@ namespace {
     /// @param type 消息类型
     /// @param requestId 回复的是哪个请求
     /// @param body 消息内容
-    /// @param flags 
-    void Coordinator::send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId, const std::vector<std::uint8_t>& body, std::uint16_t flags) {
+    /// @param flags
+    void Coordinator::send(ConnId id, xmr::protocol::MessageType type, std::uint32_t requestId,
+                           const std::vector<std::uint8_t>& body, std::uint16_t flags) {
         // 找到控制端口的TCP
         const auto it = conns_.find(id);
         if (it == conns_.end()) {
@@ -803,14 +1071,13 @@ namespace {
         std::size_t offset = 0;
         do {
             const std::size_t n = std::min<std::size_t>(xmr::protocol::kChunkBytes, total - offset);
-            xmr::protocol::DataMessage data;
+            xmr::protocol::Chunk data;
             data.offset = offset;
             data.total = total;
             data.payload.assign(blob.begin() + static_cast<std::ptrdiff_t>(offset),
                                 blob.begin() + static_cast<std::ptrdiff_t>(offset + n));
             const bool more = offset + n < total;
-            send(id, xmr::protocol::MessageType::Data, requestId, data.encode(),
-                 more ? static_cast<std::uint16_t>(xmr::protocol::Flag::More) : 0);
+            send(id, requestId, data, more ? static_cast<std::uint16_t>(xmr::protocol::Flag::More) : 0);
             offset += n;
         } while (offset < total);
     }
@@ -864,12 +1131,34 @@ namespace {
         }
     }
 
+    class ConnectionLifecycleHandler : public ChannelInboundHandler {
+    public:
+        ConnectionLifecycleHandler(std::shared_ptr<ConnState> state, Coordinator* coordinator,
+                                   EventLoop* coordinatorLoop)
+            : state_(std::move(state)), coordinator_(coordinator), coordinatorLoop_(coordinatorLoop) {}
+
+        void channelRead(ChannelHandlerContext& ctx, std::any& message) override {
+            ctx.fireChannelRead(message);
+        }
+
+        void channelInactive(ChannelHandlerContext& ctx) override {
+            auto state = state_;
+            coordinatorLoop_->runInLoop([state, this] {
+                coordinator_->onDisconnect(state->id);
+            });
+        }
+
+    private:
+        std::shared_ptr<ConnState> state_;
+        Coordinator* coordinator_;
+        EventLoop* coordinatorLoop_;
+    };
+
     /// @brief 连到master的一条连接 收到一帧就交给coordinator线程处理
     class MasterConnHandler : public ChannelInboundHandler {
     public:
         MasterConnHandler(std::shared_ptr<ConnState> state, Coordinator* coordinator, EventLoop* coordinatorLoop)
-            : state_(std::move(state)), coordinator_(coordinator), coordinatorLoop_(coordinatorLoop) {
-        }
+            : state_(std::move(state)), coordinator_(coordinator), coordinatorLoop_(coordinatorLoop) {}
 
         void channelRead(ChannelHandlerContext& ctx, std::any& message) override {
             xmr::protocol::Frame* frame = std::any_cast<xmr::protocol::Frame>(&message);
@@ -894,7 +1183,7 @@ namespace {
         Coordinator* coordinator_;
         EventLoop* coordinatorLoop_;
     };
-} // namespace
+}  // namespace
 
 int main(int argc, char** argv) {
     // master控制面端口
@@ -916,40 +1205,50 @@ int main(int argc, char** argv) {
             throw UsageError("missing --listen");
         }
         // 控制端口
-        const auto [host,port] = parseListen(listen, "127.0.0.1");
+        const auto [host, port] = parseListen(listen, "127.0.0.1");
 
         Coordinator coordinator;
         // 独占的线程 只负责跑master自己
         EventLoop coordinatorLoop;
-        // 负责master接收新来的TCP连接 可能是连接的控制端口 也可能是连接的数据端口
+        // 负责master接收新来的TCP连接的主reactor 可能是连接的控制端口 也可能是连接的数据端口
         EventLoopGroup acceptGroup(1);
-        // master真正干活的线程
+        // 负责读写的从reactor
         EventLoopGroup ioGroup(kIoThreads);
         // master给worker连接进来的TCP编号
         std::atomic<ConnId> nextConnId{1};
 
         std::promise<void> donePromise;
         std::future<void> doneFuture = donePromise.get_future();
-        coordinator.setOnShutdown([&donePromise] { donePromise.set_value(); });
+        coordinator.setOnShutdown([&donePromise] {
+            donePromise.set_value();
+        });
         coordinator.setLoop(&coordinatorLoop);
 
-        std::thread coordinatorThread([&] { coordinatorLoop.run(); });
+        std::thread coordinatorThread([&] {
+            coordinatorLoop.run();
+        });
         acceptGroup.start();
         ioGroup.start();
 
         // master启动起来
-        coordinatorLoop.runInLoop([&] { coordinator.start(); });
+        coordinatorLoop.runInLoop([&] {
+            coordinator.start();
+        });
 
-        // 处理新连接：控制端口/数据端口都走同一套 用消息类型区分
+        // TCP读写逻辑 控制端口/数据端口都走同一套 用消息类型区分
         auto childHandler = [&](Channel& channel) {
             auto conn = std::make_shared<ConnState>();
             conn->id = nextConnId.fetch_add(1);
             conn->host = peerHost(channel.fd());
             conn->channel = channel.shared_from_this();
+            channel.pipeline().addLast(
+                std::make_shared<ConnectionLifecycleHandler>(conn, &coordinator, &coordinatorLoop));
             channel.pipeline().addLast(std::make_shared<xmr::protocol::FrameEncoder>());
             channel.pipeline().addLast(std::make_shared<xmr::protocol::FrameDecoder>());
             channel.pipeline().addLast(std::make_shared<MasterConnHandler>(conn, &coordinator, &coordinatorLoop));
-            coordinatorLoop.runInLoop([&coordinator, conn] { coordinator.onConnect(conn); });
+            coordinatorLoop.runInLoop([&coordinator, conn] {
+                coordinator.onConnect(conn);
+            });
         };
 
         // 监听在控制端口上
@@ -967,8 +1266,7 @@ int main(int argc, char** argv) {
             dataPort = dp;
         }
         ServerBootstrap dataServer;
-        dataServer.group(acceptGroup, ioGroup).childHandler(childHandler);
-        dataServer.bind(dataHost, dataPort);
+        dataServer.group(acceptGroup, ioGroup).childHandler(childHandler).bind(dataHost, dataPort);
         std::cout << "DATA_LISTENING " << dataHost << ":" << dataServer.port() << std::endl;
 
         coordinatorLoop.runInLoop([&coordinator, dataHost, port = dataServer.port()] {
@@ -984,12 +1282,15 @@ int main(int argc, char** argv) {
         acceptGroup.stop();
         coordinatorThread.join();
 
-        // 停掉循环后 直接用阻塞IO给每条连接发Shutdown 等对端关掉
+        // master的关机流程 停掉循环后 直接用阻塞IO给每条连接发Shutdown 等对端关掉
         for (auto& [id, conn] : coordinator.conns()) {
             try {
-                const auto frame = xmr::protocol::makeFrame(xmr::protocol::MessageType::Shutdown, 0, xmr::protocol::Shutdown{}.encode());
+                // 关机消息转换成帧字节流
+                const auto frame = xmr::protocol::makeFrame(xmr::protocol::MessageType::Shutdown, 0,
+                                                            xmr::protocol::Shutdown{}.encode());
                 const int fd = conn->channel->fd();
                 setBlocking(fd);
+                // 用TCP发出去
                 sendAll(fd, frame.data(), frame.size());
                 ::shutdown(fd, SHUT_WR);
                 char buffer[256];

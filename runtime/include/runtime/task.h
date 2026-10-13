@@ -1,12 +1,12 @@
 #pragma once
 
-#include"mapreduce/mapreduce.h"
+#include "mapreduce/mapreduce.h"
 
-#include<cstddef>
-#include<cstdint>
-#include<functional>
-#include<string>
-#include<vector>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
 
 namespace xmr {
     enum class TaskKind { Map, Reduce };
@@ -34,6 +34,8 @@ namespace xmr {
         std::size_t maps = 0;
         // map任务才要关注 map任务的输入[key,value]的key
         std::string input;
+        // map任务输入block的位置 每个是"blockId,host,port" 同一block的多个副本连续排列
+        std::vector<std::string> blocks;
     };
 
     // Data-plane encoding: the same "key\tvalue\n" layout the old files used, just
@@ -52,7 +54,7 @@ namespace xmr {
 
     // Reduce task: fetch each map task's partition through `fetch`, then
     // shuffle+reduce into the final key-ordered pairs.
-    std::vector<KeyValue> runReduceTask(const Task& task,
-                                        const std::function<std::vector<KeyValue>(
-                                            std::size_t mapTask, std::size_t partition)>& fetch);
-} // namespace xmr
+    std::vector<KeyValue> runReduceTask(
+        const Task& task,
+        const std::function<std::vector<KeyValue>(std::size_t mapTask, std::size_t partition)>& fetch);
+}  // namespace xmr
