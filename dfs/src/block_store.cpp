@@ -9,35 +9,38 @@
 #include <system_error>
 #include <utility>
 
-static std::atomic<std::uint64_t> tempCounter{0};
+namespace {
+    std::atomic<std::uint64_t> tempCounter{0};
 
-static std::uint64_t checksumOf(const std::uint8_t* data, std::size_t size) {
-    std::uint64_t hash = 1469598103934665603ull;
-    for (std::size_t i = 0; i < size; ++i) {
-        hash ^= data[i];
-        hash *= 1099511628211ull;
+    // 8字节校验和
+    std::uint64_t checksumOf(const std::uint8_t* data, std::size_t size) {
+        std::uint64_t hash = 1469598103934665603ull;
+        for (std::size_t i = 0; i < size; ++i) {
+            hash ^= data[i];
+            hash *= 1099511628211ull;
+        }
+        return hash;
     }
-    return hash;
-}
 
-static void appendBE64(std::vector<std::uint8_t>& out, std::uint64_t value) {
-    for (int i = 7; i >= 0; --i) {
-        out.push_back(static_cast<std::uint8_t>(value >> (i * 8)));
+    void appendBE64(std::vector<std::uint8_t>& out, std::uint64_t value) {
+        for (int i = 7; i >= 0; --i) {
+            out.push_back(static_cast<std::uint8_t>(value >> (i * 8)));
+        }
     }
-}
 
-static std::uint64_t readBE64(const std::uint8_t* data) {
-    std::uint64_t value = 0;
-    for (int i = 0; i < 8; ++i) {
-        value = (value << 8) | data[i];
+    std::uint64_t readBE64(const std::uint8_t* data) {
+        std::uint64_t value = 0;
+        for (int i = 0; i < 8; ++i) {
+            value = (value << 8) | data[i];
+        }
+        return value;
     }
-    return value;
-}
 
-static std::uint64_t nextTempSuffix() {
-    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    return static_cast<std::uint64_t>(now) ^ (tempCounter.fetch_add(1, std::memory_order_relaxed) + 1);
-}
+    std::uint64_t nextTempSuffix() {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        return static_cast<std::uint64_t>(now) ^ (tempCounter.fetch_add(1, std::memory_order_relaxed) + 1);
+    }
+}  // namespace
 
 BlockStore::BlockStore(std::string rootDir) : rootDir_(std::move(rootDir)) {
     if (rootDir_.empty()) {
@@ -83,13 +86,16 @@ bool BlockStore::put(const BlockId& blockId, const std::vector<std::uint8_t>& da
     if (!isValidBlockId(blockId)) {
         return false;
     }
+    // 先写到临时文件 然后再原子rename
     const std::string temp = tempPath();
     {
         std::ofstream out(temp, std::ios::binary | std::ios::trunc);
         if (!out) {
             return false;
         }
+        // 磁盘上block的格式 [8字节的大端校验和][原始数据]
         std::vector<std::uint8_t> header;
+        // 8字节校验和 大端序
         appendBE64(header, checksumOf(data.data(), data.size()));
         out.write(reinterpret_cast<const char*>(header.data()), static_cast<std::streamsize>(header.size()));
         if (!data.empty()) {
@@ -103,6 +109,7 @@ bool BlockStore::put(const BlockId& blockId, const std::vector<std::uint8_t>& da
         }
     }
     std::error_code ec;
+    // 原子rename
     std::filesystem::rename(temp, pathOf(blockId), ec);
     if (ec) {
         std::filesystem::remove(temp, ec);
@@ -139,6 +146,7 @@ std::optional<std::vector<std::uint8_t>> BlockStore::get(const BlockId& blockId)
     std::vector<std::uint8_t> data(static_cast<std::size_t>(length));
     in.seekg(0, std::ios::beg);
     if (length > 0) {
+        // 整个block文件内容读出来到内存
         in.read(reinterpret_cast<char*>(data.data()), length);
         if (!in) {
             return std::nullopt;
@@ -147,11 +155,13 @@ std::optional<std::vector<std::uint8_t>> BlockStore::get(const BlockId& blockId)
     if (data.size() < 8) {
         return std::nullopt;
     }
+    // 前8字节是大端校验和
     const std::uint64_t expected = readBE64(data.data());
     const std::uint64_t actual = checksumOf(data.data() + 8, data.size() - 8);
     if (expected != actual) {
         return std::nullopt;
     }
+    // block的原始内容
     return std::vector<std::uint8_t>(data.begin() + 8, data.end());
 }
 
@@ -164,6 +174,7 @@ bool BlockStore::remove(const BlockId& blockId) {
 }
 
 std::vector<BlockId> BlockStore::list() const {
+    // 目录下所有的block文件名
     std::vector<BlockId> blocks;
     std::error_code ec;
     std::filesystem::directory_iterator it(rootDir_, ec);
@@ -180,6 +191,7 @@ std::vector<BlockId> BlockStore::list() const {
             blocks.push_back(name);
         }
     }
+    // bkock文件名排序
     std::sort(blocks.begin(), blocks.end());
     return blocks;
 }

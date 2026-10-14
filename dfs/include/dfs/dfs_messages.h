@@ -15,13 +15,20 @@ class ByteBuffer;
 inline constexpr std::array<std::uint8_t, 4> kDfsMagic{'X', 'D', 'F', 'S'};
 inline constexpr std::uint8_t kDfsVersion = 1;
 inline constexpr std::size_t kDfsHeaderSize = 16;
+// block文件内容的硬限制
 inline constexpr std::uint32_t kDfsMaxPayloadBytes = 64u * 1024u * 1024u;
+// 大文件分块发送
 inline constexpr std::uint32_t kDfsChunkBytes = 1u << 20;
 
+// dfs block存储层帧类型
 enum class DfsMessageType : std::uint8_t {
+    // client->block server 写一个block分片
     WriteBlock = 1,
+    // block server->client 写结果回执
     WriteAck = 2,
+    // client->block server 读一个block分片
     ReadBlock = 3,
+    // block server->client 返回数据
     BlockData = 4,
 };
 
@@ -36,16 +43,33 @@ enum class DfsWireType : std::uint8_t {
     Fixed64 = 2,
 };
 
+/**
+ * dfs协议的16字节定长帧头
+ *
+ * offset 字节  字段          值
+ * 0...3   4   magic        XDFS
+ * 4       1   version
+ * 5       1   type
+ * 6...7   2   flags
+ * 8...11  4   reqId
+ * 12...15 4   body len
+ */
 struct DfsHeader {
+    // 协议版本
     std::uint8_t version = kDfsVersion;
     DfsMessageType type = DfsMessageType::WriteAck;
     std::uint16_t flags = 0;
+    // 关联req/resp
     std::uint32_t requestId = 0;
+    // body长度
     std::uint32_t payloadLen = 0;
 };
 
+// dfs消息=帧头+载荷
 struct DfsFrame {
+    // 16字节定长帧头
     DfsHeader header;
+    // TVL编码
     std::vector<std::uint8_t> body;
 };
 
@@ -130,6 +154,7 @@ private:
 };
 
 struct WriteBlock {
+    static constexpr DfsMessageType kType = DfsMessageType::WriteBlock;
     std::string blockId;
     std::uint64_t offset = 0;
     std::vector<std::uint8_t> payload;
@@ -140,6 +165,7 @@ struct WriteBlock {
 };
 
 struct WriteAck {
+    static constexpr DfsMessageType kType = DfsMessageType::WriteAck;
     std::string blockId;
     bool ok = false;
     std::string reason;
@@ -150,6 +176,7 @@ struct WriteAck {
 };
 
 struct ReadBlock {
+    static constexpr DfsMessageType kType = DfsMessageType::ReadBlock;
     std::string blockId;
     std::uint64_t offset = 0;
 
@@ -159,8 +186,13 @@ struct ReadBlock {
 };
 
 struct BlockData {
+    static constexpr DfsMessageType kType = DfsMessageType::BlockData;
+    // block文件名
     std::string blockId;
+    // 这一帧内容在整个block的位置 block内容太大的时候会分多个块发送出去
     std::uint64_t offset = 0;
+    // 标识在节点上有没有bloc数据 比如客户端想要某个block文件名的内容 但是在block节点上可能没有对应的内容
+    // false表示没有数据
     bool found = false;
     std::vector<std::uint8_t> payload;
 

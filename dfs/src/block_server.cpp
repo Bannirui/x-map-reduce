@@ -15,41 +15,54 @@
 #include <utility>
 #include <vector>
 
+// 负责存取请求的处理
 class DfsBlockServerHandler : public ChannelInboundHandler {
 public:
+    /// @param store 当前机器上的存储单元
     explicit DfsBlockServerHandler(BlockStore* store) : store_(store) {}
 
+    // 客户端有请求
     void channelRead(ChannelHandlerContext& ctx, std::any& message) override {
+        // Pipeline的解码器已经处理成了dfs消息
         DfsFrame* frame = std::any_cast<DfsFrame>(&message);
         if (frame == nullptr) {
             return;
         }
         if (frame->header.type == DfsMessageType::WriteBlock) {
+            // 要往当前存储单元存一个block
             handleWrite(ctx, *frame);
             return;
         }
         if (frame->header.type == DfsMessageType::ReadBlock) {
+            // 要从当前存储单元读一个block
             handleRead(ctx, *frame);
         }
     }
 
 private:
+    // 要往当前存储单元存一个block
     void handleWrite(ChannelHandlerContext& ctx, const DfsFrame& frame) {
         const WriteBlock chunk = WriteBlock::decode(frame.body);
+        // 校验现在收到的帧是不是合法的 分批发过来的网络帧应该是连续的
         if (chunk.offset != writeBuffer_.size()) {
             writeBuffer_.clear();
             sendWriteAck(ctx, frame.header.requestId, chunk.blockId, false, "bad offset");
             return;
         }
+        // 放到缓冲区
         writeBuffer_.insert(writeBuffer_.end(), chunk.payload.begin(), chunk.payload.end());
         if ((frame.header.flags & static_cast<std::uint16_t>(DfsFlag::More)) != 0) {
+            // 后面还有连续的帧要接 那就继续等
             return;
         }
+        // 收集完整个block内容一起写
         const bool ok = store_->put(chunk.blockId, writeBuffer_);
+        // 写完后清空缓冲区
         writeBuffer_.clear();
         sendWriteAck(ctx, frame.header.requestId, chunk.blockId, ok, ok ? std::string() : "put failed");
     }
 
+    // 要从当前存储单元读一个block
     void handleRead(ChannelHandlerContext& ctx, const DfsFrame& frame) {
         const ReadBlock request = ReadBlock::decode(frame.body);
         const auto data = store_->get(request.blockId);
@@ -60,11 +73,13 @@ private:
             sendBlockData(ctx, frame.header.requestId, out, false);
             return;
         }
+        // 大文件分块发送出去
         std::size_t offset = 0;
         do {
             const std::size_t n = std::min<std::size_t>(kDfsChunkBytes, data->size() - offset);
             BlockData out;
             out.blockId = request.blockId;
+            // 这一帧在整个block中的位置
             out.offset = offset;
             out.found = true;
             out.payload.assign(data->begin() + static_cast<std::ptrdiff_t>(offset),
@@ -81,12 +96,15 @@ private:
         ack.blockId = blockId;
         ack.ok = ok;
         ack.reason = reason;
-        sendFrame(ctx, DfsMessageType::WriteAck, rid, ack.encode(), 0);
+        sendFrame(ctx, WriteAck::kType, rid, ack.encode(), 0);
     }
 
+    /// @brief 用TCP把block内容发送出去
+    /// @param rid request id
+    /// @param data block数据
+    /// @param more 编码的时候编到flags里面
     void sendBlockData(ChannelHandlerContext& ctx, std::uint32_t rid, const BlockData& data, bool more) {
-        sendFrame(ctx, DfsMessageType::BlockData, rid, data.encode(),
-                  more ? static_cast<std::uint16_t>(DfsFlag::More) : 0);
+        sendFrame(ctx, BlockData::kType, rid, data.encode(), more ? static_cast<std::uint16_t>(DfsFlag::More) : 0);
     }
 
     void sendFrame(ChannelHandlerContext& ctx, DfsMessageType type, std::uint32_t rid,
@@ -101,6 +119,7 @@ private:
     }
 
     BlockStore* store_;
+    // 别人往我block写数据可能网络发送过来是分块了 所以我要缓冲区等整个block的内容都过来再写block文件落盘
     std::vector<std::uint8_t> writeBuffer_;
 };
 
@@ -113,12 +132,13 @@ BlockServer::~BlockServer() {
 
 std::uint16_t BlockServer::start(const std::string& host, std::uint16_t port) {
     group_.start();
-    server_.group(group_).childHandler([this](Channel& channel) {
-        channel.pipeline().addLast(std::make_shared<DfsFrameEncoder>());
-        channel.pipeline().addLast(std::make_shared<DfsFrameDecoder>());
-        channel.pipeline().addLast(std::make_shared<DfsBlockServerHandler>(&store_));
-    });
-    server_.bind(host, port);
+    server_.group(group_)
+        .childHandler([this](Channel& channel) {
+            channel.pipeline().addLast(std::make_shared<DfsFrameEncoder>());
+            channel.pipeline().addLast(std::make_shared<DfsFrameDecoder>());
+            channel.pipeline().addLast(std::make_shared<DfsBlockServerHandler>(&store_));
+        })
+        .bind(host, port);
     started_ = true;
     return server_.port();
 }

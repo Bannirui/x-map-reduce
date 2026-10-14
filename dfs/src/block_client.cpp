@@ -24,7 +24,7 @@ bool BlockClient::writeBlock(const std::string& blockId, const std::vector<std::
         chunk.payload.assign(data.begin() + static_cast<std::ptrdiff_t>(offset),
                              data.begin() + static_cast<std::ptrdiff_t>(offset + n));
         const bool more = offset + n < data.size();
-        const std::vector<std::uint8_t> frame = makeDfsFrame(DfsMessageType::WriteBlock, 1, chunk.encode(),
+        const std::vector<std::uint8_t> frame = makeDfsFrame(WriteBlock::kType, 1, chunk.encode(),
                                                              more ? static_cast<std::uint16_t>(DfsFlag::More) : 0);
         sendAll(connection.fd(), frame.data(), frame.size());
         offset += n;
@@ -50,7 +50,7 @@ std::optional<std::vector<std::uint8_t>> BlockClient::readBlock(const std::strin
     ReadBlock request;
     request.blockId = blockId;
     request.offset = 0;
-    const std::vector<std::uint8_t> frame = makeDfsFrame(DfsMessageType::ReadBlock, 1, request.encode());
+    const std::vector<std::uint8_t> frame = makeDfsFrame(ReadBlock::kType, 1, request.encode());
     sendAll(connection.fd(), frame.data(), frame.size());
 
     std::vector<std::uint8_t> result;

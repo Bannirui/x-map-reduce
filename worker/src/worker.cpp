@@ -534,8 +534,9 @@ namespace xmr::worker {
              *   - worker-worker传map output
              */
             ServerBootstrap dataServer_;
-            // dfs block服务端口
+            // 当前机器上的dfs block存储单元
             std::unique_ptr<BlockStore> blockStore_;
+            // 当前机器上的dfs block存储单元的存取接口
             std::unique_ptr<BlockServer> blockServer_;
             std::uint16_t blockPort_ = 0;
             std::promise<void> shutdown_;

@@ -1,90 +1,115 @@
-#include"dfs/dfs_messages.h"
+#include "dfs/dfs_messages.h"
 
-#include<xnet/buffer.h>
+#include <xnet/buffer.h>
 
-#include<algorithm>
-#include<cstring>
+#include <algorithm>
+#include <cstring>
 
-static void writeBE16(std::uint8_t* out, std::uint16_t value) {
-    out[0] = static_cast<std::uint8_t>(value >> 8);
-    out[1] = static_cast<std::uint8_t>(value);
-}
+namespace {
 
-static void writeBE32(std::uint8_t* out, std::uint32_t value) {
-    out[0] = static_cast<std::uint8_t>(value >> 24);
-    out[1] = static_cast<std::uint8_t>(value >> 16);
-    out[2] = static_cast<std::uint8_t>(value >> 8);
-    out[3] = static_cast<std::uint8_t>(value);
-}
-
-static std::uint16_t readBE16(const std::uint8_t* data) {
-    return static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0]) << 8) | data[1]);
-}
-
-static std::uint32_t readBE32(const std::uint8_t* data) {
-    return (static_cast<std::uint32_t>(data[0]) << 24)
-           | (static_cast<std::uint32_t>(data[1]) << 16)
-           | (static_cast<std::uint32_t>(data[2]) << 8)
-           | static_cast<std::uint32_t>(data[3]);
-}
-
-static std::uint64_t readBE64(const std::uint8_t* data) {
-    std::uint64_t value = 0;
-    for (int i = 0; i < 8; ++i) {
-        value = (value << 8) | data[i];
+    /// @brief 小端序写成大端序
+    /// @param out 大端序结果缓冲区
+    /// @param value 16位小端序
+    void writeBE16(std::uint8_t* out, std::uint16_t value) {
+        out[0] = static_cast<std::uint8_t>(value >> 8);
+        out[1] = static_cast<std::uint8_t>(value);
     }
-    return value;
-}
 
-static void appendBE16(std::vector<std::uint8_t>& out, std::uint16_t value) {
-    out.push_back(static_cast<std::uint8_t>(value >> 8));
-    out.push_back(static_cast<std::uint8_t>(value));
-}
-
-static void appendBE32(std::vector<std::uint8_t>& out, std::uint32_t value) {
-    out.push_back(static_cast<std::uint8_t>(value >> 24));
-    out.push_back(static_cast<std::uint8_t>(value >> 16));
-    out.push_back(static_cast<std::uint8_t>(value >> 8));
-    out.push_back(static_cast<std::uint8_t>(value));
-}
-
-static void appendVarint(std::vector<std::uint8_t>& out, std::uint64_t value) {
-    while (value >= 0x80u) {
-        out.push_back(static_cast<std::uint8_t>(value) | 0x80u);
-        value >>= 7;
+    /// @brief 小端序写成大端序
+    /// @param out 大端序结果缓冲区
+    /// @param value 32位小端序
+    void writeBE32(std::uint8_t* out, std::uint32_t value) {
+        out[0] = static_cast<std::uint8_t>(value >> 24);
+        out[1] = static_cast<std::uint8_t>(value >> 16);
+        out[2] = static_cast<std::uint8_t>(value >> 8);
+        out[3] = static_cast<std::uint8_t>(value);
     }
-    out.push_back(static_cast<std::uint8_t>(value));
-}
 
-static std::uint64_t readVarint(const std::uint8_t* data, std::size_t size, std::size_t& consumed) {
-    std::uint64_t result = 0;
-    unsigned shift = 0;
-    std::size_t index = 0;
-    while (index < size) {
-        const std::uint8_t byte = data[index++];
-        if (index == 10 && byte > 1) {
-            throw DfsProtocolError("varint overflow");
-        }
-        result |= static_cast<std::uint64_t>(byte & 0x7fu) << shift;
-        if ((byte & 0x80u) == 0) {
-            consumed = index;
-            return result;
-        }
-        shift += 7;
-        if (index >= 10) {
-            throw DfsProtocolError("varint overflow");
-        }
+    /// @brief 16位整数 网络数据读到本机
+    /// @param data 网络上是大端序
+    /// @return 本机是小端序
+    std::uint16_t readBE16(const std::uint8_t* data) {
+        return static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0]) << 8) | data[1]);
     }
-    throw DfsProtocolError("truncated varint");
-}
 
-static constexpr std::uint16_t kBlockIdField = 1;
-static constexpr std::uint16_t kOffsetField = 2;
-static constexpr std::uint16_t kPayloadField = 3;
-static constexpr std::uint16_t kOkField = 2;
-static constexpr std::uint16_t kReasonField = 3;
-static constexpr std::uint16_t kFoundField = 3;
-static constexpr std::uint16_t kDataPayloadField = 4;
+    /// @brief 32位整数 网络数据读到本机
+    /// @param data 网络上是大端序
+    /// @return 本机是小端序
+    std::uint32_t readBE32(const std::uint8_t* data) {
+        return (static_cast<std::uint32_t>(data[0]) << 24) | (static_cast<std::uint32_t>(data[1]) << 16) |
+               (static_cast<std::uint32_t>(data[2]) << 8) | static_cast<std::uint32_t>(data[3]);
+    }
+
+    /// @brief 64位整数 网络数据读到本机
+    /// @param data 网络上是大端序
+    /// @return 本机是小端序
+    std::uint64_t readBE64(const std::uint8_t* data) {
+        std::uint64_t value = 0;
+        for (int i = 0; i < 8; ++i) {
+            value = (value << 8) | data[i];
+        }
+        return value;
+    }
+
+    /// @brief 16位 小端数据转到大端
+    /// @param out 大端结果
+    /// @param value 小端数据
+    void appendBE16(std::vector<std::uint8_t>& out, std::uint16_t value) {
+        out.push_back(static_cast<std::uint8_t>(value >> 8));
+        out.push_back(static_cast<std::uint8_t>(value));
+    }
+
+    /// @brief 32位 小端数据转到大端
+    /// @param out 大端结果
+    /// @param value 小端数据
+    void appendBE32(std::vector<std::uint8_t>& out, std::uint32_t value) {
+        out.push_back(static_cast<std::uint8_t>(value >> 24));
+        out.push_back(static_cast<std::uint8_t>(value >> 16));
+        out.push_back(static_cast<std::uint8_t>(value >> 8));
+        out.push_back(static_cast<std::uint8_t>(value));
+    }
+
+    /// @brief 64位 小端数据转到大端
+    /// @param out 大端结果
+    /// @param value 小端数据
+    void appendVarint(std::vector<std::uint8_t>& out, std::uint64_t value) {
+        while (value >= 0x80u) {
+            out.push_back(static_cast<std::uint8_t>(value) | 0x80u);
+            value >>= 7;
+        }
+        out.push_back(static_cast<std::uint8_t>(value));
+    }
+
+    std::uint64_t readVarint(const std::uint8_t* data, std::size_t size, std::size_t& consumed) {
+        std::uint64_t result = 0;
+        unsigned shift = 0;
+        std::size_t index = 0;
+        while (index < size) {
+            const std::uint8_t byte = data[index++];
+            if (index == 10 && byte > 1) {
+                throw DfsProtocolError("varint overflow");
+            }
+            result |= static_cast<std::uint64_t>(byte & 0x7fu) << shift;
+            if ((byte & 0x80u) == 0) {
+                consumed = index;
+                return result;
+            }
+            shift += 7;
+            if (index >= 10) {
+                throw DfsProtocolError("varint overflow");
+            }
+        }
+        throw DfsProtocolError("truncated varint");
+    }
+
+    static constexpr std::uint16_t kBlockIdField = 1;
+    static constexpr std::uint16_t kOffsetField = 2;
+    static constexpr std::uint16_t kPayloadField = 3;
+    static constexpr std::uint16_t kOkField = 2;
+    static constexpr std::uint16_t kReasonField = 3;
+    static constexpr std::uint16_t kFoundField = 3;
+    static constexpr std::uint16_t kDataPayloadField = 4;
+}  // namespace
 
 std::array<std::uint8_t, kDfsHeaderSize> encodeDfsHeader(const DfsHeader& header) {
     if (header.payloadLen > kDfsMaxPayloadBytes) {
@@ -167,13 +192,9 @@ void DfsFieldWriter::putBytes(std::uint16_t id, const std::vector<std::uint8_t>&
     putField(id, DfsWireType::Bytes, value.data(), value.size());
 }
 
-DfsFieldReader::DfsFieldReader(const std::vector<std::uint8_t>& data)
-    : data_(data.data()), size_(data.size()) {
-}
+DfsFieldReader::DfsFieldReader(const std::vector<std::uint8_t>& data) : data_(data.data()), size_(data.size()) {}
 
-DfsFieldReader::DfsFieldReader(const std::uint8_t* data, std::size_t size)
-    : data_(data), size_(size) {
-}
+DfsFieldReader::DfsFieldReader(const std::uint8_t* data, std::size_t size) : data_(data), size_(size) {}
 
 bool DfsFieldReader::next() {
     if (offset_ >= size_) {
@@ -261,10 +282,17 @@ WriteBlock WriteBlock::decode(const std::vector<std::uint8_t>& body) {
     DfsFieldReader reader(body);
     while (reader.next()) {
         switch (reader.id()) {
-            case kBlockIdField: message.blockId = reader.asString(); break;
-            case kOffsetField: message.offset = reader.asU64(); break;
-            case kPayloadField: message.payload = reader.asBytes(); break;
-            default: break;
+            case kBlockIdField:
+                message.blockId = reader.asString();
+                break;
+            case kOffsetField:
+                message.offset = reader.asU64();
+                break;
+            case kPayloadField:
+                message.payload = reader.asBytes();
+                break;
+            default:
+                break;
         }
     }
     return message;
@@ -283,10 +311,17 @@ WriteAck WriteAck::decode(const std::vector<std::uint8_t>& body) {
     DfsFieldReader reader(body);
     while (reader.next()) {
         switch (reader.id()) {
-            case kBlockIdField: message.blockId = reader.asString(); break;
-            case kOkField: message.ok = reader.asU64() != 0; break;
-            case kReasonField: message.reason = reader.asString(); break;
-            default: break;
+            case kBlockIdField:
+                message.blockId = reader.asString();
+                break;
+            case kOkField:
+                message.ok = reader.asU64() != 0;
+                break;
+            case kReasonField:
+                message.reason = reader.asString();
+                break;
+            default:
+                break;
         }
     }
     return message;
@@ -304,9 +339,14 @@ ReadBlock ReadBlock::decode(const std::vector<std::uint8_t>& body) {
     DfsFieldReader reader(body);
     while (reader.next()) {
         switch (reader.id()) {
-            case kBlockIdField: message.blockId = reader.asString(); break;
-            case kOffsetField: message.offset = reader.asU64(); break;
-            default: break;
+            case kBlockIdField:
+                message.blockId = reader.asString();
+                break;
+            case kOffsetField:
+                message.offset = reader.asU64();
+                break;
+            default:
+                break;
         }
     }
     return message;
@@ -326,11 +366,20 @@ BlockData BlockData::decode(const std::vector<std::uint8_t>& body) {
     DfsFieldReader reader(body);
     while (reader.next()) {
         switch (reader.id()) {
-            case kBlockIdField: message.blockId = reader.asString(); break;
-            case kOffsetField: message.offset = reader.asU64(); break;
-            case kFoundField: message.found = reader.asU64() != 0; break;
-            case kDataPayloadField: message.payload = reader.asBytes(); break;
-            default: break;
+            case kBlockIdField:
+                message.blockId = reader.asString();
+                break;
+            case kOffsetField:
+                message.offset = reader.asU64();
+                break;
+            case kFoundField:
+                message.found = reader.asU64() != 0;
+                break;
+            case kDataPayloadField:
+                message.payload = reader.asBytes();
+                break;
+            default:
+                break;
         }
     }
     return message;
