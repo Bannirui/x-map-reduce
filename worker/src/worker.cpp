@@ -2,8 +2,6 @@
 
 #include "dfs/block_server.h"
 #include "dfs/block_store.h"
-#include "handler/worker_control_handler.h"
-#include "handler/worker_data_handler.h"
 #include "protocol/frame_codec.h"
 #include "protocol/messages.h"
 #include "runtime/exit_code.h"
@@ -12,6 +10,7 @@
 #include "worker/block_reader.h"
 #include "worker/partition_puller.h"
 #include "worker/plugin_fetcher.h"
+#include "worker/worker_handlers.h"
 
 #include <xnet/bootstrap.h>
 #include <xnet/channel.h>
@@ -254,79 +253,77 @@ namespace xmr::worker {
                 }
             }
 
-            // master给worker发消息了
+            // master给worker发消息了 worker根据不同的消息类型进行处理
             void onFrame(const xmr::protocol::Frame& frame) {
                 try {
-                    if (frame.header.type == xmr::protocol::MessageType::Pong) {
-                        // master对心跳的应答 不需要处理
-                        return;
-                    }
-                    if (frame.header.type == xmr::protocol::MessageType::Shutdown) {
-                        // master要关停了 worker退出循环
-                        signalShutdown();
-                        return;
-                    }
-                    if (frame.header.type == xmr::protocol::MessageType::MasterData) {
-                        // master数据面端口
-                        masterDataPort_ =
-                            static_cast<std::uint16_t>(xmr::protocol::MasterData::decode(frame.body).port);
-                        return;
-                    }
-                    if (frame.header.type == xmr::protocol::MessageType::TaskAssignment) {
-                        // worker收到master派发的任务
-                        const auto message = xmr::protocol::TaskAssignment::decode(frame.body);
-                        current_ = xmr::toTask(message);
-                        if (current_->kind == xmr::TaskKind::Map) {
-                            const xmr::Task task = *current_;
-                            current_.reset();
-                            stage_ = Stage::Computing;
-                            startMap(task);
-                        } else {
-                            // reduce任务附带"去哪些worker拉"的计划
-                            std::vector<Location> locations;
-                            locations.reserve(message.locations.size());
-                            for (const auto& text : message.locations) {
-                                locations.push_back(parseLocation(text));
+                    switch (frame.header.type) {
+                        case xmr::protocol::MessageType::Pong:
+                            // master对心跳的应答 不需要处理
+                            break;
+                        case xmr::protocol::MessageType::Shutdown:
+                            // master要关停了 worker退出循环
+                            signalShutdown();
+                            break;
+                        case xmr::protocol::MessageType::MasterData:
+                            // master数据面端口
+                            masterDataPort_ =
+                                static_cast<std::uint16_t>(xmr::protocol::MasterData::decode(frame.body).port);
+                            break;
+                        case xmr::protocol::MessageType::TaskAssignment: {
+                            // worker收到master派发的任务
+                            const auto message = xmr::protocol::TaskAssignment::decode(frame.body);
+                            current_ = xmr::toTask(message);
+                            if (current_->kind == xmr::TaskKind::Map) {
+                                const xmr::Task task = *current_;
+                                current_.reset();
+                                stage_ = Stage::Computing;
+                                startMap(task);
+                            } else {
+                                // reduce任务附带"去哪些worker拉"的计划
+                                std::vector<Location> locations;
+                                locations.reserve(message.locations.size());
+                                for (const auto& text : message.locations) {
+                                    locations.push_back(parseLocation(text));
+                                }
+                                const xmr::Task task = *current_;
+                                current_.reset();
+                                stage_ = Stage::Computing;
+                                startReduce(task, std::move(locations));
                             }
-                            const xmr::Task task = *current_;
-                            current_.reset();
-                            stage_ = Stage::Computing;
-                            startReduce(task, std::move(locations));
+                            break;
                         }
-                        return;
-                    }
-                    if (frame.header.type == xmr::protocol::MessageType::Cancel) {
-                        // master取消了当前任务的重复attempt 算完丢弃结果
-                        const auto cancel = xmr::protocol::Cancel::decode(frame.body);
-                        if (computing_ && computing_->kind == xmr::taskKind(cancel.kind) &&
-                            computing_->id == cancel.taskId) {
-                            cancelled_ = true;
+                        case xmr::protocol::MessageType::Cancel: {
+                            // master取消了当前任务的重复attempt 算完丢弃结果
+                            const auto cancel = xmr::protocol::Cancel::decode(frame.body);
+                            if (computing_ && computing_->kind == xmr::taskKind(cancel.kind) &&
+                                computing_->id == cancel.taskId) {
+                                cancelled_ = true;
+                            }
+                            break;
                         }
-                        return;
-                    }
-                    if (frame.header.type == xmr::protocol::MessageType::FetchPlugin) {
-                        // master告诉worker去拉插件
-                        needPlugin(xmr::protocol::FetchPlugin::decode(frame.body));
-                        return;
-                    }
-                    if (frame.header.type == xmr::protocol::MessageType::JobFinished) {
-                        // master告诉worker本job结束了 复位状态准备接下一个job
-                        resetJob();
-                        requestTaskIfIdle();
-                        return;
-                    }
-                    if (frame.header.type == xmr::protocol::MessageType::ReplicateBlock) {
-                        replicateBlock(xmr::protocol::ReplicateBlock::decode(frame.body));
-                        return;
-                    }
-                    if (frame.header.type == xmr::protocol::MessageType::DeleteBlock) {
-                        const auto request = xmr::protocol::DeleteBlock::decode(frame.body);
-                        if (blockStore_) {
-                            blockStore_->remove(request.blockId);
+                        case xmr::protocol::MessageType::FetchPlugin:
+                            // master告诉worker去拉插件
+                            needPlugin(xmr::protocol::FetchPlugin::decode(frame.body));
+                            break;
+                        case xmr::protocol::MessageType::JobFinished:
+                            // master告诉worker本job结束了 复位状态准备接下一个job
+                            resetJob();
+                            requestTaskIfIdle();
+                            break;
+                        case xmr::protocol::MessageType::ReplicateBlock:
+                            replicateBlock(xmr::protocol::ReplicateBlock::decode(frame.body));
+                            break;
+                        case xmr::protocol::MessageType::DeleteBlock: {
+                            const auto request = xmr::protocol::DeleteBlock::decode(frame.body);
+                            if (blockStore_) {
+                                blockStore_->remove(request.blockId);
+                            }
+                            break;
                         }
-                        return;
+                        default:
+                            throw std::runtime_error("unexpected master message");
+                            break;
                     }
-                    throw std::runtime_error("unexpected master message");
                 } catch (...) {
                     error_ = std::current_exception();
                     signalShutdown();
@@ -547,6 +544,7 @@ namespace xmr::worker {
 
             ThreadPool pool_{kComputeThreads};
         };
+
     }  // namespace
 
     int runWorker(WorkerConfig config) {

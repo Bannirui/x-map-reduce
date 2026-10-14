@@ -52,7 +52,7 @@ namespace xmr::protocol {
         // 心跳
         Ping = msgType(MessageCategory::Lifecycle, 2),
         Pong = msgType(MessageCategory::Lifecycle, 3),
-        // master关机通知client/worker
+        // client向master提交job的时候指定了--shutdown语义是任务执行完后关停master
         Shutdown = msgType(MessageCategory::Lifecycle, 4),
         // worker把自己的数据面监听端口报给master
         DataAddress = msgType(MessageCategory::Lifecycle, 5),
@@ -82,6 +82,7 @@ namespace xmr::protocol {
         ReduceResult = msgType(MessageCategory::Data, 2),
         // worker间拉某个map任务的分区 worker执行reduce阶段的时候只去别的worker节点拉需要分区的数据
         Pull = msgType(MessageCategory::Data, 3),
+        // client传Job插件给master
         Plugin = msgType(MessageCategory::Data, 4),
         // worker加载插件的结果
         PluginAck = msgType(MessageCategory::Data, 5),
