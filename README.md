@@ -42,36 +42,49 @@ across jobs):
 ```sh
 cd ./build/bin
 for i in 1 2 3; do
-  ./x-worker --master 127.0.0.1:9527 &
+  ./x-worker --master 127.0.0.1:9527 --data-dir blocks$i &
 done
 wait
 ```
 
 > workers no longer need the plugin up front: the master ships the `.so` to each
 > worker at submit time (cached by content hash, loaded with `dlopen`).
-> `--plugin-cache <dir>` overrides the cache dir (default `~/.cache/xmr/plugins`).
+> `--plugin-cache <dir>` overrides the plugin cache dir (default `~/.cache/xmr/plugins`).
+> `--data-dir <dir>` is the worker's local block store root (default
+> `~/.cache/xmr/blocks`); give each worker its own dir.
 
-### 1.1.3 submit a job
+### 1.1.3 put inputs into the DFS
 
-In a third shell (also from `build/bin`):
+In a third shell (also from `build/bin`), ingest the input files into the DFS.
+`x-dfs-put` chunks the local file, has the master place 3 replicas across the
+workers, writes the blocks directly to the workers, and records a DFS path:
 
 ```sh
 cd ./build/bin
+./x-dfs-put put --master 127.0.0.1:9527 asset/wordCount1.txt wordCount1.txt
+./x-dfs-put put --master 127.0.0.1:9527 asset/wordCount2.txt wordCount2.txt
+./x-dfs-put put --master 127.0.0.1:9527 asset/wordCount3.txt wordCount3.txt
+```
 
+### 1.1.4 submit a job
+
+Submit by DFS path; the client no longer uploads input bytes.
+
+```sh
+cd ./build/bin
 ./x-submit --master 127.0.0.1:9527 \
   --job word_count \
   --plugin ../lib/word_count.so \
   --reducers 3 \
   --output wc.txt \
-  asset/wordCount1.txt asset/wordCount2.txt asset/wordCount3.txt
+  wordCount1.txt wordCount2.txt wordCount3.txt
 ```
 
-> the client reads the input files and uploads them to the master (data plane);
-> workers fetch their splits over TCP. The master does not keep them on disk.
+> `Submit.inputs` are DFS paths (built by `x-dfs-put`); the master resolves each
+> path to its blocks and schedules map tasks on the workers holding them.
+> Blocks live in the DFS and are not removed when the job ends.
 > `--plugin` is the client's local `.so`; it is uploaded to the master and
 > distributed to the workers (the master does not need it on disk).
-> the master manages workers, so no worker count is needed: it starts once the
-> connected workers have loaded the plugin.
 > add `--shutdown` to stop the master (and its workers) after the job.
 > submit again to run another job on the same running master/workers.
 

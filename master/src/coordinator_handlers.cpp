@@ -57,7 +57,7 @@ namespace xmr::master {
         // client给master提交的job
         const auto submit = xmr::protocol::Submit::decode(frame.body);
         xmr::protocol::SubmitAck ack;
-        // master的数据端口 让client传job插件和input过来
+        // master的数据端口 让client传job插件
         ack.dataHost = dataHost_;
         ack.dataPort = dataPort_;
         if (submit.job.empty() || submit.output.empty() || submit.inputs.empty() || submit.reducers == 0) {
@@ -66,14 +66,25 @@ namespace xmr::master {
             connections_.send(conn.id, frame.header.requestId, ack);
             return;
         }
-        // 标识master已经开始受理client的job了 现在开始等client把master需要的job插件和input传进来
+        // 提交的inputs是DFS路径 从命名空间解析出每个文件的block清单
+        std::vector<std::vector<std::string> > inputs;
+        inputs.reserve(submit.inputs.size());
+        for (const auto& path : submit.inputs) {
+            const auto it = namespace_.find(path);
+            if (it == namespace_.end()) {
+                ack.statusCode = xmr::protocol::StatusCode::NotFound;
+                ack.reason = "unknown dfs path: " + path;
+                connections_.send(conn.id, frame.header.requestId, ack);
+                return;
+            }
+            inputs.push_back(it->second);
+        }
+        // 标识master已经开始受理client的job了 现在开始等job插件(如果client带了)
         pending_ = Pending{conn.id, submit, frame.header.requestId};
-        // 将来接收client从数据端口传input
-        pendingInputBlocks_.assign(submit.inputs.size(), {});
-        // 总共M个数据 client会从数据端口传过来 每传过来一个就统计起来 保证map阶段依赖的数据是全的
-        uploadDone_ = false;
+        pendingInputBlocks_ = std::move(inputs);
         ack.statusCode = xmr::protocol::StatusCode::Ok;
         connections_.send(conn.id, frame.header.requestId, ack);
+        maybeStartJob();
     }
 
     void Coordinator::onPluginChunk(ConnState& conn, const xmr::protocol::Frame& frame) {
@@ -153,26 +164,25 @@ namespace xmr::master {
     }
 
     void Coordinator::onBlockManifest(ConnState& conn, const xmr::protocol::Frame& frame) {
-        // client把切好的block清单报上来 请master按副本策略分配worker
+        // client(dfs put)把切好的block清单报上来 请master按副本策略分配worker
         auto manifest = xmr::protocol::BlockManifest::decode(frame.body);
-        for (const auto& entry : manifest.blocks) {
-            const auto first = entry.find(',');
-            if (first == std::string::npos) {
-                continue;
-            }
-            const std::size_t input = static_cast<std::size_t>(std::stoull(entry.substr(0, first)));
-            const std::string blockId = manifestBlockId(entry);
-            if (input < pendingInputBlocks_.size() && !blockId.empty()) {
-                pendingInputBlocks_[input].push_back(blockId);
-            }
-        }
         blocks_.queueManifest(conn.id, frame.header.requestId, std::move(manifest));
         tryPlaceBlocks();
     }
 
-    void Coordinator::onUploadDone() {
-        uploadDone_ = true;
-        maybeStartJob();
+    void Coordinator::onCommitFile(ConnState& conn, const xmr::protocol::Frame& frame) {
+        // client把一个文件对应的block清单提交上来 建立命名空间 path -> [blockId]
+        auto commit = xmr::protocol::CommitFile::decode(frame.body);
+        xmr::protocol::CommitAck ack;
+        if (commit.path.empty() || commit.blocks.empty()) {
+            ack.statusCode = xmr::protocol::StatusCode::InvalidArgument;
+            ack.reason = "invalid commit";
+            connections_.send(conn.id, frame.header.requestId, ack);
+            return;
+        }
+        namespace_[commit.path] = std::move(commit.blocks);
+        ack.statusCode = xmr::protocol::StatusCode::Ok;
+        connections_.send(conn.id, frame.header.requestId, ack);
     }
 
     void Coordinator::onBlockReport(ConnState& conn, const xmr::protocol::Frame& frame) {

@@ -123,8 +123,8 @@ namespace xmr::master {
         void onDataAddress(ConnState& conn, const xmr::protocol::Frame& frame);
         // client把切好的block清单报给master 请master分配副本位置
         void onBlockManifest(ConnState& conn, const xmr::protocol::Frame& frame);
-        // client把block都写完的通知
-        void onUploadDone();
+        // client把一个DFS路径对应的block清单提交给master 建立命名空间
+        void onCommitFile(ConnState& conn, const xmr::protocol::Frame& frame);
         // worker上报自己本地持有的block清单
         void onBlockReport(ConnState& conn, const xmr::protocol::Frame& frame);
         // worker告诉master自己在等待任务
@@ -214,10 +214,10 @@ namespace xmr::master {
             std::uint32_t requestId = 0;
         };
 
-        // 每个输入文件按顺序的blockId列表 由client的block清单得到
+        // 每个输入文件的blockId列表 提交时由DFS命名空间解析得到
         std::vector<std::vector<std::string> > pendingInputBlocks_;
-        // client是否已把全部block直接写到worker并通知完成
-        bool uploadDone_ = false;
+        // DFS命名空间: 路径 -> 按顺序的blockId列表(仅内存,不持久化)
+        std::unordered_map<std::string, std::vector<std::string> > namespace_;
         PluginDistributor plugins_;
         // master数据端口 供client上传插件/worker拉取map的input
         std::string dataHost_;

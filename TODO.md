@@ -114,9 +114,9 @@ TODO
   - 目标：提交job只报DFS路径；master查命名空间→map split；client零上传且只需连master(顺带解决client跨机/跨集群)
   - 前提：数据已通过 dfs put 入库，文件/块常驻，不随job结束GC
   - 最小可用版(不落盘)
-    - [ ] master内存命名空间 path -> [blockId]，locator复用 workerBlocks_
-    - [ ] 抽独立 dfs put：切块→BlockManifest/BlockPlacement→直写→CommitFile{path,blocks}
-    - [ ] Submit.inputs 语义改为DFS路径；master查命名空间→buildMapBlocks；去掉提交时的manifest/placement等待与 uploadDone_ 门控
+    - [x] master内存命名空间 path -> [blockId]，locator复用 workerBlocks_
+    - [x] 抽独立 dfs put：切块→BlockManifest/BlockPlacement→直写→CommitFile{path,blocks}
+    - [x] Submit.inputs 语义改为DFS路径；master查命名空间→buildMapBlocks；去掉提交时的manifest/placement等待与 uploadDone_ 门控
   - 完整版
     - [ ] 命名空间持久化+重启恢复(同时补上缺的元数据checkpoint)；locator靠worker BlockReport回填
     - [ ] GC语义改：块属于文件，job结束不删；dfs rm 引用计数到0才真删

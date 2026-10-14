@@ -110,6 +110,10 @@ namespace xmr::protocol {
         BlockReport = msgType(MessageCategory::Dfs, 5),
         // master让worker删掉某个不再需要的block
         DeleteBlock = msgType(MessageCategory::Dfs, 6),
+        // client把一个DFS路径对应的block清单提交给master 建立命名空间
+        CommitFile = msgType(MessageCategory::Dfs, 7),
+        // master对CommitFile的应答
+        CommitAck = msgType(MessageCategory::Dfs, 8),
     };
 
     /// @param type 消息编码
@@ -430,6 +434,16 @@ namespace xmr::protocol {
     namespace deleteBlock {
         inline constexpr std::uint16_t kBlockId = 1;
     }  // namespace deleteBlock
+
+    namespace commitFile {
+        inline constexpr std::uint16_t kPath = 1;
+        inline constexpr std::uint16_t kBlock = 2;
+    }  // namespace commitFile
+
+    namespace commitAck {
+        inline constexpr std::uint16_t kStatusCode = 1;
+        inline constexpr std::uint16_t kReason = 2;
+    }  // namespace commitAck
 
     // 内容哈希(FNV-1a 64) 十六进制 用作插件的缓存key
     std::string contentHash(const std::vector<std::uint8_t>& data);

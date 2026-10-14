@@ -9,7 +9,7 @@ namespace {
     void usage(const char* program) {
         std::cerr << "Usage: " << program
             << " --master <host:port> --job <name> [--plugin <path>] [--reducers <R>]"
-            << " [--shutdown] --output <file> <input...>\n";
+            << " [--shutdown] --output <file> <dfs-path...>\n";
     }
 } // namespace
 

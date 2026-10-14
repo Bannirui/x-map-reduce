@@ -808,4 +808,56 @@ namespace xmr::protocol {
         }
         return message;
     }
+
+    std::vector<std::uint8_t> CommitFile::encode() const {
+        FieldWriter writer;
+        writer.putString(commitFile::kPath, path);
+        for (const auto& block : blocks) {
+            writer.putString(commitFile::kBlock, block);
+        }
+        return writer.take();
+    }
+
+    CommitFile CommitFile::decode(const std::vector<std::uint8_t>& body) {
+        CommitFile message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case commitFile::kPath:
+                    message.path = reader.asString();
+                    break;
+                case commitFile::kBlock:
+                    message.blocks.push_back(reader.asString());
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
+
+    std::vector<std::uint8_t> CommitAck::encode() const {
+        FieldWriter writer;
+        writer.putU64(commitAck::kStatusCode, static_cast<std::uint64_t>(statusCode));
+        writer.putString(commitAck::kReason, reason);
+        return writer.take();
+    }
+
+    CommitAck CommitAck::decode(const std::vector<std::uint8_t>& body) {
+        CommitAck message;
+        FieldReader reader(body);
+        while (reader.next()) {
+            switch (reader.id()) {
+                case commitAck::kStatusCode:
+                    message.statusCode = decodeStatus(reader.asU64());
+                    break;
+                case commitAck::kReason:
+                    message.reason = reader.asString();
+                    break;
+                default:
+                    break;
+            }
+        }
+        return message;
+    }
 } // namespace xmr::protocol

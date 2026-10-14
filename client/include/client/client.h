@@ -50,6 +50,14 @@ namespace xmr::client {
          */
         bool submit(const SubmitRequest& request, std::string& reason);
 
+        /**
+         * 把本地文件切块直接写入DFS的worker 再提交DFS路径建立命名空间
+         * @param localPath 本地文件
+         * @param dfsPath DFS路径(后续提交job用)
+         * @return false表示入库失败
+         */
+        bool put(const std::string& localPath, const std::string& dfsPath, std::string& reason);
+
         // 提交成功后等job结果
         SubmitResult wait();
 
@@ -67,7 +75,8 @@ namespace xmr::client {
 
         protocol::Frame receive();
 
-        bool uploadBlocks(const std::vector<std::vector<std::uint8_t> >& inputs, std::string& reason);
+        bool uploadBlocks(const std::vector<std::vector<std::uint8_t> >& inputs,
+                          std::vector<std::vector<std::string> >& blockIds, std::string& reason);
 
         void onFrame(protocol::Frame frame);
 

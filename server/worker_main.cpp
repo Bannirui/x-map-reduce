@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
     std::string master;
     // 目录 缓存Job插件
     std::string pluginCacheDir;
-    // block清单
+    // 存放block文件的路径 所有的block文件都放在这儿
     std::string dataDir;
     // 解析启动参数
     for (int i = 1; i < argc; ++i) {

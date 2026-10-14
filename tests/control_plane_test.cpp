@@ -92,14 +92,15 @@ std::map<std::string, std::string> readOutput(const fs::path& path) {
 // distributes work to two persistent workers over TCP (no shared work dir);
 // only --output is a file.
 int main(int argc, char** argv) {
-    if (argc != 5) {
-        std::cerr << "Usage: control_plane_test <path-to-master> <path-to-worker> <path-to-submit> <path-to-job-plugin>\n";
+    if (argc != 6) {
+        std::cerr << "Usage: control_plane_test <path-to-master> <path-to-worker> <path-to-submit> <path-to-job-plugin> <path-to-dfs-put>\n";
         return 2;
     }
     const std::string master = argv[1];
     const std::string worker = argv[2];
     const std::string submit = argv[3];
     const std::string plugin = argv[4];
+    const std::string dfsPut = argv[5];
 
     const fs::path dir = fs::temp_directory_path() / "x-map-reduce-control-plane-test";
     fs::remove_all(dir);
@@ -148,7 +149,16 @@ int main(int argc, char** argv) {
                                                    "--data-dir", dataDir.string()}));
     }
 
-    // Submit the job (uploading the plugin) and wait for the result.
+    // Ingest the local files into the DFS; the client keeps only the DFS path.
+    const std::vector<std::string> dfsPaths = {"in0.txt", "in1.txt", "in2.txt"};
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        const pid_t putPid = startProcess(dfsPut, {"put", "--master", address,
+                                                   inputs[i].string(), dfsPaths[i]});
+        check(putPid > 0, "dfs put client should start");
+        check(waitProcess(putPid) == 0, "dfs put should exit 0");
+    }
+
+    // Submit the job by DFS path (uploading only the plugin) and wait for the result.
     std::vector<std::string> submitArgs = {
         "--master", address,
         "--job", "word_count",
@@ -157,8 +167,8 @@ int main(int argc, char** argv) {
         "--output", output.string(),
         "--shutdown",
     };
-    for (const auto& input : inputs) {
-        submitArgs.push_back(input.string());
+    for (const auto& path : dfsPaths) {
+        submitArgs.push_back(path);
     }
     const pid_t submitPid = startProcess(submit, submitArgs);
     check(submitPid > 0, "submit client should start");
@@ -186,7 +196,7 @@ int main(int argc, char** argv) {
             }
         }
     }
-    check(blockCount == 0, "job blocks are garbage collected at job end");
+    check(blockCount > 0, "dfs blocks persist after the job");
 
     fs::remove_all(dir);
 

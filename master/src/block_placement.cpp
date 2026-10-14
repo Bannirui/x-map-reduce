@@ -51,7 +51,6 @@ namespace xmr::master {
 
     void BlockPlacement::onReport(const std::string& workerId, const std::vector<std::string>& blocks) {
         std::unordered_set<std::string>& held = workerBlocks_[workerId];
-        held.clear();
         for (const auto& blockId : blocks) {
             held.insert(blockId);
         }

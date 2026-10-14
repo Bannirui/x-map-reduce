@@ -101,8 +101,8 @@ namespace xmr::master {
                 case xmr::protocol::MessageType::BlockManifest:
                     onBlockManifest(conn, frame);
                     break;
-                case xmr::protocol::MessageType::UploadDone:
-                    onUploadDone();
+                case xmr::protocol::MessageType::CommitFile:
+                    onCommitFile(conn, frame);
                     break;
                 case xmr::protocol::MessageType::BlockReport:
                     onBlockReport(conn, frame);

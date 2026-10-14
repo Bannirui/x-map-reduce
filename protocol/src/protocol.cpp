@@ -244,6 +244,10 @@ namespace xmr::protocol {
                 return "BLOCK_REPORT";
             case MessageType::DeleteBlock:
                 return "DELETE_BLOCK";
+            case MessageType::CommitFile:
+                return "COMMIT_FILE";
+            case MessageType::CommitAck:
+                return "COMMIT_ACK";
         }
         return "UNKNOWN";
     }

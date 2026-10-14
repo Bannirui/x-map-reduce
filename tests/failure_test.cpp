@@ -86,7 +86,7 @@ namespace {
     }
 
     bool submitJob(const std::string& submit, const std::string& address, const std::string& plugin,
-                   const fs::path& output, const std::vector<fs::path>& inputs, bool shutdown) {
+                   const fs::path& output, const std::vector<std::string>& dfsPaths, bool shutdown) {
         std::vector<std::string> args = {
             "--master", address,
             "--job", "word_count",
@@ -97,8 +97,8 @@ namespace {
         if (shutdown) {
             args.push_back("--shutdown");
         }
-        for (const auto& input : inputs) {
-            args.push_back(input.string());
+        for (const auto& path : dfsPaths) {
+            args.push_back(path);
         }
         const pid_t pid = startProcess(submit, args);
         return pid > 0 && waitProcess(pid) == 0;
@@ -107,14 +107,15 @@ namespace {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 5) {
-        std::cerr << "Usage: failure_test <path-to-master> <path-to-worker> <path-to-submit> <path-to-job-plugin>\n";
+    if (argc != 6) {
+        std::cerr << "Usage: failure_test <path-to-master> <path-to-worker> <path-to-submit> <path-to-job-plugin> <path-to-dfs-put>\n";
         return 2;
     }
     const std::string master = argv[1];
     const std::string worker = argv[2];
     const std::string submit = argv[3];
     const std::string plugin = argv[4];
+    const std::string dfsPut = argv[5];
 
     const fs::path dir = fs::temp_directory_path() / "x-map-reduce-failure-test";
     fs::remove_all(dir);
@@ -152,8 +153,17 @@ int main(int argc, char** argv) {
                                                    "--data-dir", dataDir.string()}));
     }
 
+    // Ingest the inputs into the DFS once; both jobs read by DFS path.
+    const std::vector<std::string> dfsPaths = {"in0.txt", "in1.txt", "in2.txt"};
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        const pid_t putPid = startProcess(dfsPut, {"put", "--master", address,
+                                                   inputs[i].string(), dfsPaths[i]});
+        check(putPid > 0, "dfs put client should start");
+        check(waitProcess(putPid) == 0, "dfs put should exit 0");
+    }
+
     const fs::path out1 = dir / "out1.txt";
-    check(submitJob(submit, address, plugin, out1, inputs, false), "first job succeeds with two workers");
+    check(submitJob(submit, address, plugin, out1, dfsPaths, false), "first job succeeds with two workers");
 
     ::kill(workerPids[1], SIGKILL);
     waitProcess(workerPids[1]);
@@ -161,7 +171,7 @@ int main(int argc, char** argv) {
     ::usleep(500 * 1000);
 
     const fs::path out2 = dir / "out2.txt";
-    check(submitJob(submit, address, plugin, out2, inputs, true), "second job succeeds after a worker died");
+    check(submitJob(submit, address, plugin, out2, dfsPaths, true), "second job succeeds after a worker died");
 
     check(waitProcess(masterPid) == 0, "master exits 0");
     check(waitProcess(workerPids[0]) == 0, "surviving worker exits 0");

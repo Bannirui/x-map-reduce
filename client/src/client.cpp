@@ -113,17 +113,6 @@ namespace xmr::client {
     }
 
     bool Client::submit(const SubmitRequest& request, std::string& reason) {
-        // 读本地输入文件
-        std::vector<std::vector<std::uint8_t> > inputs;
-        inputs.reserve(request.inputs.size());
-        for (const auto& path : request.inputs) {
-            std::ifstream in(path, std::ios::binary);
-            if (!in) {
-                reason = "failed to open input: " + path;
-                return false;
-            }
-            inputs.emplace_back(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-        }
         // 读本地插件 算出内容哈希
         std::vector<std::uint8_t> plugin;
         if (!request.pluginPath.empty()) {
@@ -139,6 +128,7 @@ namespace xmr::client {
         submit.job = request.job;
         submit.reducers = request.reducers;
         submit.output = request.output;
+        // inputs是DFS路径(先经dfs put入库)
         submit.inputs = request.inputs;
         if (!plugin.empty()) {
             submit.pluginHash = protocol::contentHash(plugin);
@@ -191,13 +181,44 @@ namespace xmr::client {
         }
         // 数据面写完后延迟关闭 排空出站缓冲再真正关掉
         data->close();
-        if (!uploadBlocks(inputs, reason)) {
-            return false;
-        }
         return true;
     }
 
-    bool Client::uploadBlocks(const std::vector<std::vector<std::uint8_t> >& inputs, std::string& reason) {
+    bool Client::put(const std::string& localPath, const std::string& dfsPath, std::string& reason) {
+        std::ifstream in(localPath, std::ios::binary);
+        if (!in) {
+            reason = "failed to open input: " + localPath;
+            return false;
+        }
+        std::vector<std::uint8_t> blob((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::vector<std::vector<std::string> > blockIds;
+        if (!uploadBlocks({blob}, blockIds, reason)) {
+            return false;
+        }
+
+        protocol::CommitFile commit;
+        commit.path = dfsPath;
+        if (!blockIds.empty()) {
+            commit.blocks = blockIds.front();
+        }
+        send(3, commit);
+
+        while (true) {
+            const protocol::Frame frame = receive();
+            if (frame.header.type == protocol::MessageType::CommitAck) {
+                const auto ack = protocol::CommitAck::decode(frame.body);
+                if (ack.statusCode != protocol::StatusCode::Ok) {
+                    reason = ack.reason;
+                    return false;
+                }
+                return true;
+            }
+        }
+    }
+
+    bool Client::uploadBlocks(const std::vector<std::vector<std::uint8_t> >& inputs,
+                              std::vector<std::vector<std::string> >& blockIds, std::string& reason) {
+        blockIds.assign(inputs.size(), {});
         std::unordered_map<std::string, std::vector<std::uint8_t> > byId;
         std::vector<std::string> manifest;
         for (std::size_t index = 0; index < inputs.size(); ++index) {
@@ -212,6 +233,7 @@ namespace xmr::client {
                 byId[blockId] = std::move(part);
                 manifest.push_back(std::to_string(index) + "," + std::to_string(blockIndex) + ","
                                    + blockId + "," + std::to_string(n));
+                blockIds[index].push_back(blockId);
                 offset += n;
                 ++blockIndex;
             } while (offset < blob.size());
@@ -257,8 +279,6 @@ namespace xmr::client {
             }
         }
 
-        protocol::UploadDone done;
-        send(0, done);
         return true;
     }
 

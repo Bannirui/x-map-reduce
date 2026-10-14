@@ -38,12 +38,12 @@ add_test(NAME frame_codec_test COMMAND frame_codec_test)
 
 add_executable(control_plane_test control_plane_test.cpp)
 target_link_libraries(control_plane_test PRIVATE mapreduce)
-add_dependencies(control_plane_test x-master x-worker x-submit plugin_word_count)
+add_dependencies(control_plane_test x-master x-worker x-submit x-dfs-put plugin_word_count)
 add_test(NAME control_plane_test COMMAND control_plane_test
-    $<TARGET_FILE:x-master> $<TARGET_FILE:x-worker> $<TARGET_FILE:x-submit> $<TARGET_FILE:plugin_word_count>)
+    $<TARGET_FILE:x-master> $<TARGET_FILE:x-worker> $<TARGET_FILE:x-submit> $<TARGET_FILE:plugin_word_count> $<TARGET_FILE:x-dfs-put>)
 
 add_executable(failure_test failure_test.cpp)
 target_link_libraries(failure_test PRIVATE mapreduce)
-add_dependencies(failure_test x-master x-worker x-submit plugin_word_count)
+add_dependencies(failure_test x-master x-worker x-submit x-dfs-put plugin_word_count)
 add_test(NAME failure_test COMMAND failure_test
-    $<TARGET_FILE:x-master> $<TARGET_FILE:x-worker> $<TARGET_FILE:x-submit> $<TARGET_FILE:plugin_word_count>)
+    $<TARGET_FILE:x-master> $<TARGET_FILE:x-worker> $<TARGET_FILE:x-submit> $<TARGET_FILE:plugin_word_count> $<TARGET_FILE:x-dfs-put>)

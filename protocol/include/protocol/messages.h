@@ -355,6 +355,30 @@ namespace xmr::protocol {
         static DeleteBlock decode(const std::vector<std::uint8_t>& body);
     };
 
+    // client把一个DFS路径对应的block清单提交给master 建立 path -> [blockId] 命名空间
+    struct CommitFile {
+        static constexpr MessageType kType = MessageType::CommitFile;
+        // DFS路径
+        std::string path;
+        // 这个文件按顺序切成的blockId列表
+        std::vector<std::string> blocks;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static CommitFile decode(const std::vector<std::uint8_t>& body);
+    };
+
+    // master对CommitFile的应答
+    struct CommitAck {
+        static constexpr MessageType kType = MessageType::CommitAck;
+        StatusCode statusCode = StatusCode::Ok;
+        std::string reason;
+
+        std::vector<std::uint8_t> encode() const;
+
+        static CommitAck decode(const std::vector<std::uint8_t>& body);
+    };
+
     template <class Message>
     inline constexpr MessageType messageTypeOf = Message::kType;
 }  // namespace xmr::protocol

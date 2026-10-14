@@ -69,9 +69,6 @@ namespace xmr::master {
         if (!pending_) {
             return;
         }
-        if (!uploadDone_) {
-            return;
-        }
         const std::string& hash = pending_->submit.pluginHash;
         if (!hash.empty() && !plugins_.has(hash)) {
             return;
@@ -80,7 +77,6 @@ namespace xmr::master {
         const xmr::protocol::Submit submit = pending_->submit;
         std::vector<std::vector<std::string> > mapBlocks = buildMapBlocks();
         pending_.reset();
-        uploadDone_ = false;
         startJob(client, submit, std::move(mapBlocks));
     }
 
@@ -124,29 +120,7 @@ namespace xmr::master {
         if (job_->client != 0) {
             connections_.send(job_->client, 0, result);
         }
-        // job结束 回收本次job的block 让worker删掉它
-        std::unordered_set<std::string> jobBlocks;
-        for (const auto& perInput : job_->mapBlocks) {
-            for (const auto& entry : perInput) {
-                const auto comma = entry.find(',');
-                jobBlocks.insert(comma == std::string::npos ? entry : entry.substr(0, comma));
-            }
-        }
-        for (const auto& workerEntry : blocks_.heldWorkers()) {
-            const auto byName = connections_.connOf(workerEntry.first);
-            if (!byName) {
-                continue;
-            }
-            for (const auto& blockId : workerEntry.second) {
-                if (jobBlocks.count(blockId) == 0) {
-                    continue;
-                }
-                xmr::protocol::DeleteBlock request;
-                request.blockId = blockId;
-                connections_.send(*byName, 0, request);
-            }
-        }
-        blocks_.clear();
+        // 输入block属于DFS,常驻不随job结束删除
         job_.reset();
     }
 }  // namespace xmr::master
