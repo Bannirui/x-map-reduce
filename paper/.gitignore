@@ -1,0 +1,35 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.run.xml
+*.synctex.gz
+*.synctex(busy)
+*.toc
+*.lof
+*.lot
+# NOTE: "*.out" 已在根 .gitignore 中覆盖（作为可执行文件忽略），此处不再重复
+*.xdv
+*.nav
+*.snm
+*.vrb
+
+# LaTeX auxiliary directories / caches
+*.latexmk
+.asv/
+_region_.*
+__latexindent*
+
+# Editor leftovers for LaTeX
+*.tec
+*.pdf_view
+*.bkp
+
+# PDF 阅读器的临时锁文件（预览 main.pdf 时自动生成）
+.~lock.*
+
+# 编译产物 PDF：默认保留（便于评审/归档），如需忽略请取消注释
+# *.pdf
