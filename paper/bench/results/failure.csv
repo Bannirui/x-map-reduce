@@ -1,0 +1,4 @@
+scenario,workers,dataset,job_seconds,kill_after_s,recovered,output_lines,exit_code
+kill_after_1s,4,10MB,12.416209941,1,1,2000,0
+kill_after_2s,4,10MB,12.568759480,2,1,2000,0
+kill_after_3s,4,10MB,13.291157202,3,1,2000,0
