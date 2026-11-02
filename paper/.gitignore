@@ -33,3 +33,5 @@ __latexindent*
 
 # 编译产物 PDF：默认保留（便于评审/归档），如需忽略请取消注释
 # *.pdf
+
+[Bb][Uu][Ii][Ll][Dd]
